@@ -1,0 +1,8 @@
+{
+  "name": "Pawrenting REMOV - Pendaftaran Vaksinasi Anabul",
+  "description": "Form pendaftaran event Pawrenting REMOV untuk kucing dan anjing dengan sistem kuota vaksin real-time, penguncian kuota pembayaran, sinkronisasi Google Sheets, dan dashboard admin fleksibel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

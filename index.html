@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pawrenting REMOV - Pendaftaran Vaksinasi Anabul</title>
+    <meta name="description" content="Form pendaftaran event Pawrenting REMOV untuk kucing dan anjing dengan sistem kuota vaksin real-time, penguncian kuota pembayaran, sinkronisasi Google Sheets, dan dashboard admin fleksibel." />
+    <meta property="og:title" content="Pawrenting REMOV - Pendaftaran Vaksinasi Anabul" />
+    <meta property="og:description" content="Form pendaftaran event Pawrenting REMOV untuk kucing dan anjing dengan sistem kuota vaksin real-time, penguncian kuota pembayaran, sinkronisasi Google Sheets, dan dashboard admin fleksibel." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet">
+    <script>
+      // Suppress benign WebSocket/HMR transport connection errors in sandboxed iframe environment
+      window.addEventListener('error', function (event) {
+        var msg = (event && event.message) ? String(event.message) : '';
+        if (msg.includes('WebSocket') || msg.includes('vite') || msg.includes('createWebSocketModuleRunnerTransport')) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = (event && event.reason) ? String(event.reason) : '';
+        if (reason.includes('WebSocket') || reason.includes('vite') || reason.includes('createWebSocketModuleRunnerTransport')) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+    </script>
+  </head>
+  <body class="bg-[#fefdf5] text-[#141414] antialiased selection:bg-[#fff000] selection:text-[#141414] font-sans">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

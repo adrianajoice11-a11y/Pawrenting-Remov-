@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 80" fill="none">
+  <rect width="240" height="80" rx="18" fill="#FFF000"/>
+  <rect x="6" y="6" width="68" height="68" rx="14" fill="#141414"/>
+  <circle cx="29" cy="28" r="5" fill="#FFF000"/>
+  <circle cx="43" cy="24" r="5" fill="#FFF000"/>
+  <circle cx="53" cy="34" r="5" fill="#FFF000"/>
+  <circle cx="23" cy="40" r="4.5" fill="#FFF000"/>
+  <path d="M27 48c0-7 6-12 13-12s13 5 13 12c0 6-5 11-13 11s-13-5-13-11z" fill="#FFF000"/>
+  <text x="86" y="45" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="30" fill="#141414" letter-spacing="1">REMOV</text>
+  <text x="88" y="62" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="11" fill="#44403C" letter-spacing="2">PAWRENTING CARE</text>
+</svg>

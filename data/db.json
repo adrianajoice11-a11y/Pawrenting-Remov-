@@ -1,0 +1,464 @@
+{
+  "event": {
+    "id": "remov-event-2026",
+    "title": "PAWRENTING REMOV 2026",
+    "subtitle": "Vaksinasi Massal & Edukasi Kesehatan Anabul (Kucing & Anjing)",
+    "tagline": "Wujudkan Anabul Sehat, Bahagia, & Bebas Penyakit Bersama REMOV Pet Care",
+    "date": "Minggu, 24 Mei 2026",
+    "timeRange": "08:30 - 16:00 WIB",
+    "locationName": "REMOV Care Center & Vet Clinic (Main Hall)",
+    "locationAddress": "Jl. Boulevard Raya No. 88, Kebayoran Baru, Jakarta Selatan",
+    "contactWhatsApp": "081299887766",
+    "whatsappGroupLink": "https://chat.whatsapp.com/GrupResmiPawrentingRemov2026",
+    "whatsappGroupPrompt": "Jika sudah mengisi semua data diri secara lengkap dan ketentuan yang berlaku silahkan untuk join ke Group WhatsApp Resmi Pawrenting Remov sesuai dengan link di bawah ini",
+    "sessions": [
+      "Pukul 09.00 - 12.00 WIB (Kloter 1)",
+      "Pukul 12.00 - 14.00 WIB (Kloter 2)",
+      "Pukul 14.00 - 16.00 WIB (Kloter 3)"
+    ],
+    "bankAccounts": [
+      {
+        "id": "bank-bca",
+        "bankName": "BCA (Bank Central Asia)",
+        "accountNumber": "8730921200",
+        "accountHolder": "PT REMOV PET CARE INDONESIA",
+        "qrisUrl": "",
+        "notes": "Rekening Utama Tiket & Registrasi",
+        "active": true
+      },
+      {
+        "id": "bank-mandiri",
+        "bankName": "Bank Mandiri",
+        "accountNumber": "157001122334",
+        "accountHolder": "PT REMOV PET CARE INDONESIA",
+        "qrisUrl": "",
+        "notes": "Transfer via Livin by Mandiri / BI-Fast",
+        "active": true
+      },
+      {
+        "id": "bank-qris",
+        "bankName": "QRIS REMOV Official (Semua E-Wallet & Mobile Banking)",
+        "accountNumber": "NMID: ID1020039201992",
+        "accountHolder": "REMOV PAWRENTING VAKSINASI",
+        "qrisUrl": "",
+        "notes": "Support Scan QRIS GoPay, OVO, Dana, ShopeePay, BCA",
+        "active": true
+      }
+    ],
+    "termsAndConditions": [
+      "Anabul minimal berusia 3 bulan (untuk Rabies) atau minimal 2 bulan (untuk Tricat F3 / DHPPi).",
+      "Kondisi anabul harus sehat, aktif, nafsu makan baik, dan tidak ada riwayat demam/diare/muntah dalam 7 hari terakhir.",
+      "Anabul betina TIDAK dalam kondisi bunting atau sedang menyusui anak.",
+      "Anabul sudah bebas dari kutu dan jamur parah (disarankan gunakan spray anti kutu REMOV 2 hari sebelum vaksin).",
+      "Bagi yang sudah pernah vaksin, dimohon membawa buku vaksinasi sebelumnya saat hadir.",
+      "Wajib membawa pet cargo/carrier yang aman bagi kucing, atau harness/leash untuk anjing demi keamanan bersama."
+    ],
+    "healthChecklistItems": [
+      {
+        "id": "chk-1",
+        "text": "Anabul minimal berusia 3 bulan (untuk Rabies) atau minimal 2 bulan (untuk Tricat F3 / DHPPi).",
+        "required": true
+      },
+      {
+        "id": "chk-2",
+        "text": "Kondisi anabul harus sehat, aktif, nafsu makan baik, dan tidak ada riwayat demam/diare/muntah dalam 7 hari terakhir.",
+        "required": true
+      },
+      {
+        "id": "chk-3",
+        "text": "Anabul betina TIDAK dalam kondisi bunting atau sedang menyusui anak.",
+        "required": true
+      },
+      {
+        "id": "chk-4",
+        "text": "Anabul sudah bebas dari kutu dan jamur parah (disarankan gunakan spray anti kutu REMOV 2 hari sebelum vaksin).",
+        "required": true
+      },
+      {
+        "id": "chk-5",
+        "text": "Bagi yang sudah pernah vaksin, dimohon membawa buku vaksinasi sebelumnya saat hadir.",
+        "required": true
+      },
+      {
+        "id": "chk-6",
+        "text": "Wajib membawa pet cargo/carrier yang aman bagi kucing, atau harness/leash untuk anjing demi keamanan bersama.",
+        "required": true
+      }
+    ],
+    "removLogoUrl": "/logos/remov-logo.svg",
+    "partnerLogoUrl": "",
+    "partnerName": "",
+    "backgroundImageUrl": "/backgrounds/pawrenting-kuning-remov.svg",
+    "backgroundOverlayOpacity": 78,
+    "bookingSuccessLabel": "SUKSES BOOKING",
+    "ticketArrivalNote": "Harap datang ke booth Pawrenting REMOV tepat waktu sesuai kloter jam yang dipilih. Jika ada perubahan jadwal, mohon konfirmasi terlebih dahulu kepada pihak panitia.",
+    "paymentTimeoutHours": 2,
+    "queueCounter": 2,
+    "voucherTemplate": {
+      "title": "Voucher Belanja Petshop REMOV",
+      "codePrefix": "REMOV-PS",
+      "benefitText": "Voucher Belanja Produk REMOV & Petshop Rp 50.000",
+      "imageUrl": "/vouchers/voucher-remov-default.svg",
+      "description": "Kompensasi resmi bagi peserta Pawrenting REMOV yang telah melakukan pembayaran booking namun berhalangan hadir di hari pelaksanaan. Berlaku untuk 1x penukaran.",
+      "validUntil": "31 Desember 2026"
+    },
+    "spreadsheetConfig": {
+      "groupByVaccine": true,
+      "tableHeaderPrefix": "TABEL KELOMPOK VAKSIN",
+      "headerColorHex": "#FFF000",
+      "columns": [
+        {
+          "key": "queueNumber",
+          "label": "No. Antrian",
+          "enabled": true
+        },
+        {
+          "key": "barcodeCode",
+          "label": "Barcode Antrian",
+          "enabled": true
+        },
+        {
+          "key": "checkInStatus",
+          "label": "Status Hadir Booth",
+          "enabled": true
+        },
+        {
+          "key": "checkedInAt",
+          "label": "Waktu Check-In",
+          "enabled": true
+        },
+        {
+          "key": "createdAt",
+          "label": "Timestamp Daftar",
+          "enabled": true
+        },
+        {
+          "key": "ownerName",
+          "label": "Nama Lengkap",
+          "enabled": true
+        },
+        {
+          "key": "ownerPhone",
+          "label": "No Telepon",
+          "enabled": true
+        },
+        {
+          "key": "ownerCity",
+          "label": "Alamat Lengkap",
+          "enabled": true
+        },
+        {
+          "key": "referralSource",
+          "label": "Informasi Vaksin",
+          "enabled": true
+        },
+        {
+          "key": "petType",
+          "label": "Jenis Hewan Peliharaan",
+          "enabled": true
+        },
+        {
+          "key": "petName",
+          "label": "Nama Anabul yang akan divaksin",
+          "enabled": true
+        },
+        {
+          "key": "petGender",
+          "label": "Jenis Kelamin Anabul",
+          "enabled": true
+        },
+        {
+          "key": "vaccineName",
+          "label": "Pilih Vaksin",
+          "enabled": true
+        },
+        {
+          "key": "selectedSession",
+          "label": "Pemilihan kloter Pemeriksaan",
+          "enabled": true
+        },
+        {
+          "key": "paymentProofUrl",
+          "label": "Bukti Payment Booking",
+          "enabled": true
+        },
+        {
+          "key": "paymentStatus",
+          "label": "Status Booking",
+          "enabled": true
+        },
+        {
+          "key": "joinedWhatsAppGroup",
+          "label": "Status Group WhatsApp",
+          "enabled": true
+        },
+        {
+          "key": "regNumber",
+          "label": "No. Registrasi",
+          "enabled": true
+        },
+        {
+          "key": "voucherCode",
+          "label": "Kode Voucher Petshop",
+          "enabled": true
+        }
+      ]
+    },
+    "holdDurationMinutes": 10,
+    "adminPin": "remov2026"
+  },
+  "vaccines": [
+    {
+      "id": "vac-rabies",
+      "name": "Vaksin Anti-Rabies",
+      "code": "RABIES",
+      "category": "semua",
+      "totalQuota": 15,
+      "price": 150000,
+      "description": "Perlindungan esensial dari virus Rabies untuk kucing & anjing. Bersertifikat resmi dari dokter hewan berizin.",
+      "minAgeMonths": 3,
+      "active": true,
+      "notes": "Wajib untuk semua anabul umur min. 3 bulan",
+      "confirmedCount": 2,
+      "heldCount": 0,
+      "availableQuota": 48,
+      "isSoldOut": false
+    },
+    {
+      "id": "vac-f3",
+      "name": "Vaksin F3 (Tricat / Felocell 3)",
+      "code": "F3",
+      "category": "kucing",
+      "totalQuota": 15,
+      "price": 125000,
+      "description": "Mencegah 3 penyakit mematikan pada kucing: Feline Panleukopenia, Rhinotracheitis (Flu Kucing), & Calicivirus.",
+      "minAgeMonths": 2,
+      "active": true,
+      "notes": "Khusus Anabul Kucing min. 2 bulan"
+    },
+    {
+      "id": "vac-f4",
+      "name": "Hanya Pemeriksaan Dokter Hewan ",
+      "code": "PEMERIKSAAN DOKTER",
+      "category": "semua",
+      "totalQuota": 5000,
+      "price": 0,
+      "description": "Perlindungan 4 in 1: Panleukopenia, Calicivirus, Rhinotracheitis + Chlamydia Psittaci.",
+      "minAgeMonths": 2,
+      "active": true,
+      "notes": "Khusus Kucing dengan perlindungan tambahan Chlamydia",
+      "confirmedCount": 0,
+      "heldCount": 0,
+      "availableQuota": 15,
+      "isSoldOut": false
+    },
+    {
+      "id": "vac-vanguard",
+      "name": "Vaksin DHPPi (Vanguard Plus 5)",
+      "code": "VANGUARD",
+      "category": "anjing",
+      "totalQuota": 20,
+      "price": 145000,
+      "description": "Vaksin inti anjing untuk pencegahan Distemper, Hepatitis, Parvovirus, dan Parainfluenza tipe 2.",
+      "minAgeMonths": 2,
+      "active": true,
+      "notes": "Khusus Anabul Anjing min. 2 bulan"
+    }
+  ],
+  "registrations": [
+    {
+      "id": "reg-demo-spread-1",
+      "regNumber": "REMOV-2026-RAB-0012",
+      "createdAt": "2026-11-12T12:27:14.000Z",
+      "eventTitle": "PAWRENTING REMOV 2026",
+      "ownerName": "Jo",
+      "ownerPhone": "08912345678",
+      "ownerEmail": "jo.anabul@gmail.com",
+      "ownerCity": "Cimahi",
+      "ownerInstagram": "@jo_pets",
+      "referralSource": "Instagram",
+      "petType": "kucing",
+      "petName": "Audy",
+      "petBreed": "Domestik Mix",
+      "petGender": "jantan",
+      "isSterilized": false,
+      "petAge": "1 tahun",
+      "petWeightKg": 3.8,
+      "petColor": "Tabby Oranye",
+      "previousVaccineHistory": "Pernah vaksin tahun lalu",
+      "healthConfirmation": {
+        "isHealthy": true,
+        "notPregnantOrNursing": true,
+        "minAgeMet": true,
+        "noFeverOrDiarrhea": true,
+        "agreedToTerms": true
+      },
+      "vaccineId": "vac-rabies",
+      "vaccineName": "Vaksin Anti-Rabies",
+      "vaccinePrice": 50000,
+      "selectedSession": "Pukul 12.00 - 14.00 WIB (Kloter 2)",
+      "totalAmount": 50000,
+      "paymentMethod": "BCA (Bank Central Asia)",
+      "paymentBankTarget": "BCA (8730921200)",
+      "paymentProofUrl": "https://drive.google.com/open?id=1JmhlPeMmstMtzCLOL85GnQ1qNPjHuog4",
+      "paymentProofType": "link",
+      "paymentStatus": "verified",
+      "paymentNotes": "Bukti transfer Google Drive terverifikasi mutasi rekening",
+      "verifiedAt": "2026-11-12T12:35:00.000Z",
+      "joinedWhatsAppGroup": true,
+      "syncedToGoogleSheet": true,
+      "sheetSyncedAt": "2026-11-12T12:35:00.000Z",
+      "queueSequence": 1,
+      "queueNumber": "01",
+      "barcodeCode": "REMOV-Q01-2026",
+      "checkInStatus": "belum_hadir"
+    },
+    {
+      "id": "reg-demo-1",
+      "regNumber": "REMOV-2026-RAB-0001",
+      "createdAt": "2026-11-10T22:00:00.000Z",
+      "eventTitle": "PAWRENTING REMOV 2026",
+      "ownerName": "Sarah Amanda Putri",
+      "ownerPhone": "081234567890",
+      "ownerEmail": "sarah.amanda@gmail.com",
+      "ownerCity": "Jakarta Selatan",
+      "ownerInstagram": "@sarahamanda.cat",
+      "referralSource": "Instagram @remov.official",
+      "petType": "kucing",
+      "petName": "Mochi",
+      "petBreed": "British Shorthair (BSH)",
+      "petGender": "jantan",
+      "isSterilized": true,
+      "petAge": "1 tahun 2 bulan",
+      "petWeightKg": 4.2,
+      "petColor": "Abu-abu (Blue)",
+      "previousVaccineHistory": "Pernah vaksin lengkap tahun lalu",
+      "healthConfirmation": {
+        "isHealthy": true,
+        "notPregnantOrNursing": true,
+        "minAgeMet": true,
+        "noFeverOrDiarrhea": true,
+        "agreedToTerms": true
+      },
+      "vaccineId": "vac-rabies",
+      "vaccineName": "Vaksin Anti-Rabies",
+      "vaccinePrice": 50000,
+      "selectedSession": "Pukul 09.00 - 12.00 WIB (Kloter 1)",
+      "addOns": [
+        {
+          "id": "addon-1",
+          "name": "REMOV Flea & Tick Care Spray 100ml",
+          "price": 45000
+        }
+      ],
+      "totalAmount": 95000,
+      "paymentMethod": "BCA (Bank Central Asia)",
+      "paymentBankTarget": "BCA (8730921200)",
+      "paymentProofUrl": "",
+      "paymentProofType": "upload",
+      "paymentStatus": "verified",
+      "paymentNotes": "Pembayaran telah dicek & terkonfirmasi mutasi rekening",
+      "verifiedAt": "2026-11-11T02:00:00.000Z",
+      "joinedWhatsAppGroup": true,
+      "syncedToGoogleSheet": true,
+      "sheetSyncedAt": "2026-11-11T02:00:00.000Z",
+      "queueSequence": 2,
+      "queueNumber": "02",
+      "barcodeCode": "REMOV-Q02-2026",
+      "checkInStatus": "belum_hadir"
+    },
+    {
+      "id": "reg-demo-2",
+      "regNumber": "REMOV-2026-F3-0002",
+      "createdAt": "2026-11-11T10:00:00.000Z",
+      "eventTitle": "PAWRENTING REMOV 2026",
+      "ownerName": "Budi Santoso",
+      "ownerPhone": "085712348899",
+      "ownerEmail": "budi.santoso@yahoo.com",
+      "ownerCity": "Tangerang Selatan",
+      "ownerInstagram": "@budisantoso_pets",
+      "referralSource": "Komunitas Pecinta Kucing",
+      "petType": "kucing",
+      "petName": "Luna",
+      "petBreed": "Domestik Mix Persia",
+      "petGender": "betina",
+      "isSterilized": false,
+      "petAge": "7 bulan",
+      "petWeightKg": 2.8,
+      "petColor": "Calico (Tiga Warna)",
+      "previousVaccineHistory": "Belum pernah vaksin",
+      "healthConfirmation": {
+        "isHealthy": true,
+        "notPregnantOrNursing": true,
+        "minAgeMet": true,
+        "noFeverOrDiarrhea": true,
+        "agreedToTerms": true
+      },
+      "vaccineId": "vac-f3",
+      "vaccineName": "Vaksin F3 (Tricat / Felocell 3)",
+      "vaccinePrice": 125000,
+      "selectedSession": "Pukul 12.00 - 14.00 WIB (Kloter 2)",
+      "totalAmount": 125000,
+      "paymentMethod": "QRIS REMOV Official",
+      "paymentBankTarget": "QRIS REMOV Official (NMID: ID1020039201992)",
+      "paymentProofUrl": "",
+      "paymentProofType": "upload",
+      "paymentStatus": "pending",
+      "paymentNotes": "Menunggu pengecekan bukti pembayaran",
+      "verifiedAt": "",
+      "joinedWhatsAppGroup": false,
+      "syncedToGoogleSheet": true,
+      "sheetSyncedAt": "2026-11-11T14:00:00.000Z",
+      "checkInStatus": "belum_hadir"
+    }
+  ],
+  "holds": [],
+  "vouchers": [],
+  "archives": [
+    {
+      "id": "arc-sample-2025",
+      "eventTitle": "PAWRENTING REMOV BANDUNG 2025",
+      "subtitle": "Roadshow Vaksinasi Anabul & Edukasi Nutrisi",
+      "locationName": "Meow & Bark Petshop Hub Bandung",
+      "locationAddress": "Jl. Riau No. 45, Bandung",
+      "city": "Bandung",
+      "eventDate": "16 November 2025",
+      "month": "November",
+      "year": "2025",
+      "partnerName": "Meow & Bark Petshop Bandung",
+      "partnerLogoUrl": "",
+      "programsRun": [
+        "Vaksinasi Rabies Massal",
+        "Vaksinasi F3 Kucing",
+        "Pemeriksaan Kesehatan Gratis",
+        "Edukasi Pawrenting"
+      ],
+      "summaryNotes": "Kolaborasi perdana bersama Meow & Bark Petshop Bandung berjalan lancar dengan tingkat kehadiran 96%.",
+      "documentationPhotos": [
+        "/backgrounds/pawrenting-klinik-cerah.jpg",
+        "/backgrounds/pawrenting-taman-komunitas.jpg"
+      ],
+      "totalRegistrations": 65,
+      "totalAttended": 62,
+      "totalVaccinatedByVaccine": [
+        {
+          "vaccineName": "Vaksin Anti-Rabies",
+          "count": 50
+        },
+        {
+          "vaccineName": "Vaksin F3 (Tricat / Felocell 3)",
+          "count": 15
+        }
+      ],
+      "registrations": [],
+      "archivedAt": "2025-11-16T17:00:00.000Z"
+    }
+  ],
+  "sheetConfig": {
+    "webhookUrl": "",
+    "autoSync": true,
+    "lastSyncTime": "",
+    "lastSyncStatus": "idle",
+    "lastSyncMessage": "Belum pernah sinkronisasi ke Google Sheets"
+  }
+}
