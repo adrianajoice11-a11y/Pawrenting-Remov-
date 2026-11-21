@@ -446,27 +446,32 @@ function parseDbPayload(parsed: any): AppDatabase {
     ? parsed.registrations
     : defaultInitialData.registrations;
 
-  // Ensure verified registrations have queueNumber & barcodeCode
+  // Ensure verified registrations have queueNumber & barcodeCode, and restore any legacy auto-expired bookings
   let maxSeq = mergedEvent.queueCounter || 0;
   const normalizedRegs = rawRegs.map((r) => {
-    if (r.paymentStatus === 'verified' && !r.queueNumber) {
-      maxSeq += 1;
-      const qStr = String(maxSeq).padStart(2, '0');
-      return {
-        ...r,
-        queueSequence: maxSeq,
-        queueNumber: qStr,
-        barcodeCode: r.barcodeCode || `REMOV-Q${qStr}-${new Date().getFullYear()}`,
-        checkInStatus: r.checkInStatus || 'belum_hadir',
-      };
-    }
-    if (r.queueSequence && r.queueSequence > maxSeq) {
-      maxSeq = r.queueSequence;
-    }
-    return {
+    const normalized: Registration = {
       ...r,
       checkInStatus: r.checkInStatus || 'belum_hadir',
     };
+    if (normalized.paymentStatus === 'expired') {
+      normalized.paymentStatus = 'pending_payment';
+      normalized.paymentDeadlineAt = undefined;
+      normalized.paymentNotes = 'Menunggu upload bukti bayar (pendaftaran tersimpan permanen — tidak hangus).';
+    }
+    if (normalized.paymentStatus === 'verified' && !normalized.queueNumber) {
+      maxSeq += 1;
+      const qStr = String(maxSeq).padStart(2, '0');
+      return {
+        ...normalized,
+        queueSequence: maxSeq,
+        queueNumber: qStr,
+        barcodeCode: normalized.barcodeCode || `REMOV-Q${qStr}-${new Date().getFullYear()}`,
+      };
+    }
+    if (normalized.queueSequence && normalized.queueSequence > maxSeq) {
+      maxSeq = normalized.queueSequence;
+    }
+    return normalized;
   });
   mergedEvent.queueCounter = maxSeq;
 
@@ -586,21 +591,6 @@ function cleanExpiredHoldsAndBookings(db: AppDatabase): boolean {
     changed = true;
   }
 
-  // Expire unpaid bookings whose 2-hour deadline has passed
-  db.registrations.forEach((reg) => {
-    if (
-      (reg.paymentStatus === 'pending_payment' || (reg.paymentStatus === 'pending' && !reg.paymentProofUrl)) &&
-      reg.paymentDeadlineAt
-    ) {
-      const deadlineMs = new Date(reg.paymentDeadlineAt).getTime();
-      if (!isNaN(deadlineMs) && now > deadlineMs) {
-        reg.paymentStatus = 'expired';
-        reg.paymentNotes = 'Otomatis hangus: melewati batas waktu 2 jam tanpa bukti pembayaran.';
-        changed = true;
-      }
-    }
-  });
-
   return changed;
 }
 
@@ -661,7 +651,7 @@ async function startServer() {
     app.use(`/${folder}`, express.static(path.resolve(PUBLIC_DIR, folder)));
   });
 
-  // Periodic cleaner for 10-min checkout holds and 2-hour unpaid booking deadlines
+  // Periodic cleaner for 10-min checkout holds
   setInterval(() => {
     const db = readDb();
     if (cleanExpiredHoldsAndBookings(db)) {
@@ -927,7 +917,7 @@ async function startServer() {
 
   // 4. PUBLIC: Submit Registration (POST /api/registrations)
   // - With paymentProofUrl -> Auto-verified booking + Instant Queue Number (01, 02, 03...) + Barcode!
-  // - Without paymentProofUrl -> Pending payment with 2-hour deadline; expires automatically if unpaid!
+  // - Without paymentProofUrl -> Saved permanently (pending_payment) without expiration!
   app.post('/api/registrations', async (req, res) => {
     try {
       const regData = req.body;
@@ -993,8 +983,6 @@ async function startServer() {
       const hasProof = proofUrl.length > 0;
       const proofType: 'upload' | 'link' = proofUrl.startsWith('data:') ? 'upload' : (proofUrl.startsWith('http') ? 'link' : 'upload');
       const nowIso = new Date().toISOString();
-      const timeoutHours = db.event.paymentTimeoutHours || 2;
-      const deadlineIso = new Date(Date.now() + timeoutHours * 3600 * 1000).toISOString();
 
       const newRegistration: Registration = {
         id: regId,
@@ -1037,10 +1025,10 @@ async function startServer() {
         paymentProofUrl: proofUrl,
         paymentProofType: proofType,
         paymentStatus: hasProof ? 'verified' : 'pending_payment',
-        paymentDeadlineAt: hasProof ? undefined : deadlineIso,
+        paymentDeadlineAt: undefined,
         paymentNotes: hasProof
           ? 'Otomatis terverifikasi saat bukti payment booking dilampirkan'
-          : `Belum upload bukti bayar. Batas waktu pelunasan ${timeoutHours} jam sebelum otomatis hangus.`,
+          : 'Belum upload bukti bayar (pendaftaran tersimpan permanen — tidak hangus).',
         verifiedAt: hasProof ? nowIso : undefined,
         checkInStatus: 'belum_hadir',
         joinedWhatsAppGroup: !!regData.joinedWhatsAppGroup,
@@ -1095,7 +1083,7 @@ async function startServer() {
         registration: newRegistration,
         message: newRegistration.paymentStatus === 'verified'
           ? `Sukses Booking! Nomor Antrian Anda: ${newRegistration.queueNumber}`
-          : `Data tersimpan! Segera unggah bukti payment dalam ${timeoutHours} jam agar mendapat nomor antrian.`
+          : 'Data pendaftaran tersimpan permanen! Anda dapat mengunggah bukti payment kapan saja agar mendapat nomor antrian.'
       });
     } catch (err: any) {
       console.error('Error submitting registration:', err);
@@ -1103,7 +1091,7 @@ async function startServer() {
     }
   });
 
-  // 4b. PUBLIC: Upload Payment Proof Within 2-Hour Window (POST /api/registrations/:id/submit-proof)
+  // 4b. PUBLIC: Upload Payment Proof Anytime (POST /api/registrations/:id/submit-proof)
   app.post('/api/registrations/:id/submit-proof', (req, res) => {
     const { id } = req.params;
     const { paymentProofUrl, paymentMethod, paymentBankTarget, joinedWhatsAppGroup } = req.body;
@@ -1120,14 +1108,6 @@ async function startServer() {
       return res.status(404).json({ success: false, message: 'Data pendaftaran tidak ditemukan.' });
     }
 
-    if (reg.paymentStatus === 'expired') {
-      return res.status(410).json({
-        success: false,
-        expired: true,
-        message: 'Maaf, batas waktu 2 jam telah berakhir sehingga formulir ini dianggap HANGUS. Silakan mengisi ulang formulir atau memilih vaksin lain.'
-      });
-    }
-
     const proofUrl = String(paymentProofUrl).trim();
     reg.paymentProofUrl = proofUrl;
     reg.paymentProofType = proofUrl.startsWith('data:') ? 'upload' : (proofUrl.startsWith('http') ? 'link' : 'upload');
@@ -1138,7 +1118,7 @@ async function startServer() {
     reg.paymentStatus = 'verified';
     reg.verifiedAt = new Date().toISOString();
     reg.paymentDeadlineAt = undefined;
-    reg.paymentNotes = 'Otomatis terverifikasi setelah bukti payment diunggah dalam batas waktu 2 jam';
+    reg.paymentNotes = 'Otomatis terverifikasi setelah bukti payment diunggah';
     assignQueueNumberIfMissing(db, reg);
     writeDb(db);
 

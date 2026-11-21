@@ -3,7 +3,7 @@ export const GOOGLE_APPS_SCRIPT_CODE = `/**
  * Mendukung:
  * 1. Pengelompokan tabel per jenis vaksin dalam 1 sheet (format dinamis dari Dashboard Admin)
  * 2. Nomor Antrian (01, 02, 03...), Barcode Antrian, & Status Check-In Booth otomatis
- * 3. Status Booking (Otomatis Verified / Pending 2 Jam / Hangus) & Kode Voucher Petshop
+ * 3. Status Booking (Otomatis Verified / Menunggu Upload Bukti) & Kode Voucher Petshop
  *
  * CARA PEMASANGAN:
  * 1. Buka Google Spreadsheet Anda > Extensions > Apps Script.
@@ -23,8 +23,8 @@ function resolveColumnValue(d, key) {
   var paymentMap = {
     verified: "SUKSES BOOKING",
     pending: "Menunggu Verifikasi",
-    pending_payment: "Menunggu Bayar (2 Jam)",
-    expired: "HANGUS (>2 Jam)",
+    pending_payment: "Menunggu Upload Bukti",
+    expired: "Menunggu Upload Bukti",
     rejected: "Ditolak"
   };
   switch (key) {

@@ -203,10 +203,10 @@ export const CheckTicketModal: React.FC<CheckTicketProps> = ({ event, onBackToFo
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         {event.bookingSuccessLabel || 'SUKSES BOOKING'}
                       </span>
-                    ) : result.paymentStatus === 'expired' ? (
+                    ) : result.paymentStatus === 'rejected' ? (
                       <span className="inline-flex items-center gap-1 bg-rose-100 text-rose-800 px-3 py-1 rounded-full text-xs font-extrabold border border-rose-300">
                         <XCircle className="w-3.5 h-3.5" />
-                        HANGUS (&gt; 2 JAM)
+                        DITOLAK
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-900 px-3 py-1 rounded-full text-xs font-extrabold border border-amber-300">

@@ -10,8 +10,8 @@ const CHECKIN_LABELS: Record<string, string> = {
 const PAYMENT_LABELS: Record<string, string> = {
   verified: 'SUKSES BOOKING',
   pending: 'Menunggu Verifikasi',
-  pending_payment: 'Menunggu Bayar (Batas 2 Jam)',
-  expired: 'HANGUS (>2 Jam)',
+  pending_payment: 'Menunggu Upload Bukti',
+  expired: 'Menunggu Upload Bukti',
   rejected: 'Ditolak',
 };
 

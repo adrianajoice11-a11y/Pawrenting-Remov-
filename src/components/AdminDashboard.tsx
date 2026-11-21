@@ -973,10 +973,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             <div className="bg-white p-5 rounded-3xl border border-stone-200 shadow-xs">
-              <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Pending / Hangus</span>
+              <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Menunggu Bukti Bayar</span>
               <span className="font-heading font-black text-3xl text-amber-600">{adminData.stats.pendingCount}</span>
-              <span className="text-[11px] text-rose-600 font-bold block mt-1">
-                {adminData.stats.expiredCount} Hangus (&gt;2 Jam)
+              <span className="text-[11px] text-stone-500 font-semibold block mt-1">
+                Tersimpan permanen (tidak hangus)
               </span>
             </div>
 
@@ -1203,8 +1203,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               >
                 <option value="all">Semua Status Bayar</option>
                 <option value="verified">Sukses Booking (Verified)</option>
-                <option value="pending_payment">Menunggu Bayar (2 Jam)</option>
-                <option value="expired">Hangus (&gt;2 Jam)</option>
+                <option value="pending_payment">Menunggu Upload Bukti</option>
                 <option value="rejected">Ditolak</option>
               </select>
 
@@ -1313,11 +1312,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <CheckCircle className="w-3 h-3" />
                               Sukses Booking
                             </span>
-                          ) : reg.paymentStatus === 'expired' ? (
-                            <span className="inline-flex items-center gap-1 bg-rose-100 text-rose-800 px-2.5 py-0.5 rounded-full text-[11px] font-bold">
-                              <XCircle className="w-3 h-3" />
-                              Hangus (&gt;2 Jam)
-                            </span>
                           ) : reg.paymentStatus === 'rejected' ? (
                             <span className="inline-flex items-center gap-1 bg-rose-100 text-rose-800 px-2.5 py-0.5 rounded-full text-[11px] font-bold">
                               Ditolak
@@ -1325,7 +1319,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           ) : (
                             <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-900 px-2.5 py-0.5 rounded-full text-[11px] font-bold">
                               <Clock className="w-3 h-3" />
-                              Pending (2 Jam)
+                              Menunggu Bukti
                             </span>
                           )}
                           {reg.voucherCode && (
@@ -2041,8 +2035,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               >
                 <option value="all">Semua Status</option>
                 <option value="verified">Sukses Booking</option>
-                <option value="pending_payment">Menunggu Bayar (2 Jam)</option>
-                <option value="expired">Hangus (&gt;2 Jam)</option>
+                <option value="pending_payment">Menunggu Upload Bukti</option>
                 <option value="rejected">Ditolak</option>
               </select>
             </div>
@@ -2812,12 +2805,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
-          {/* 4. Editable Queue Ticket Footer Copy + Payment Timeout */}
+          {/* 4. Editable Queue Ticket Footer Copy */}
           <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-4 text-xs">
             <h3 className="font-heading font-bold text-base text-[#141414]">
-              Teks Nomor Antrian (Sukses Booking) & Batas Waktu Pembayaran
+              Teks Nomor Antrian (Sukses Booking)
             </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4">
               <div>
                 <label className="font-bold uppercase text-stone-600 block mb-1">Label Status Sukses Booking</label>
                 <input
@@ -2828,17 +2821,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 />
               </div>
               <div>
-                <label className="font-bold uppercase text-stone-600 block mb-1">Batas Waktu Bayar Sebelum Hangus (Jam)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={24}
-                  value={eventForm.paymentTimeoutHours || 2}
-                  onChange={(e) => setEventForm({ ...eventForm, paymentTimeoutHours: Number(e.target.value) || 2 })}
-                  className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300"
-                />
-              </div>
-              <div className="md:col-span-2">
                 <label className="font-bold uppercase text-stone-600 block mb-1">
                   Deskripsi di Bawah Nomor Antrian (Dapat Diubah Kapan Saja)
                 </label>

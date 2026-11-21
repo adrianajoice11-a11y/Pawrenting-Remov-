@@ -22,10 +22,10 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   vaccines,
   onRefreshData,
 }) => {
-  // Current Step: 1 (Owner), 2 (Pet & Dynamic Checklist), 3 (Vaccine), 4 (Hold & Payment), 5 (Queue Ticket / 2h Warning)
+  // Current Step: 1 (Owner), 2 (Pet & Dynamic Checklist), 3 (Vaccine), 4 (Hold & Payment), 5 (Queue Ticket / Pending Proof)
   const [currentStep, setCurrentStep] = useState<number>(1);
 
-  // Resume unpaid booking state (within 2h window)
+  // Resume unpaid booking state
   const [showResumeBox, setShowResumeBox] = useState<boolean>(false);
   const [resumeQuery, setResumeQuery] = useState<string>('');
   const [resumeError, setResumeError] = useState<string | null>(null);
@@ -87,11 +87,10 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Completed Registration & 2-Hour Payment Countdown
+  // Completed Registration & Late Proof Upload
   const [confirmedRegistration, setConfirmedRegistration] = useState<Registration | null>(null);
   const [ticketQrUrl, setTicketQrUrl] = useState<string>('');
   const [copiedBank, setCopiedBank] = useState<string | null>(null);
-  const [paymentDeadlineRemaining, setPaymentDeadlineRemaining] = useState<number>(0);
   const [lateProofType, setLateProofType] = useState<'upload' | 'link'>('upload');
   const [lateProofData, setLateProofData] = useState<string>('');
   const [lateProofName, setLateProofName] = useState<string>('');
@@ -232,27 +231,6 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     }, 1000);
     return () => clearInterval(interval);
   }, [holdExpiresAt, event.holdDurationMinutes, onRefreshData]);
-
-  // 2-hour payment deadline countdown for pending_payment bookings
-  useEffect(() => {
-    if (!confirmedRegistration || confirmedRegistration.paymentStatus !== 'pending_payment' || !confirmedRegistration.paymentDeadlineAt) {
-      return;
-    }
-
-    const updateTick = () => {
-      const deadlineMs = new Date(confirmedRegistration.paymentDeadlineAt!).getTime();
-      const diff = Math.max(0, Math.floor((deadlineMs - Date.now()) / 1000));
-      setPaymentDeadlineRemaining(diff);
-      if (diff <= 0) {
-        setConfirmedRegistration(prev => prev ? { ...prev, paymentStatus: 'expired' } : null);
-        onRefreshData();
-      }
-    };
-
-    updateTick();
-    const timer = setInterval(updateTick, 1000);
-    return () => clearInterval(timer);
-  }, [confirmedRegistration?.id, confirmedRegistration?.paymentStatus, confirmedRegistration?.paymentDeadlineAt, onRefreshData]);
 
   // Generate Queue Barcode QR Code when verified
   useEffect(() => {
@@ -423,7 +401,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       : (proofType === 'upload' ? paymentProofData : paymentProofLink.trim());
 
     if (!allowDeferred && !finalProofUrl && grandTotal > 0) {
-      setSubmitError('Silakan unggah foto / tempel link bukti payment booking terlebih dahulu, atau klik tombol "Simpan Dulu & Bayar Dalam 2 Jam".');
+      setSubmitError('Silakan unggah foto / tempel link bukti payment booking terlebih dahulu, atau klik tombol "Simpan Dulu & Upload Bukti Nanti".');
       return;
     }
 
@@ -512,9 +490,6 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       const data = await res.json();
       if (!res.ok || !data.success) {
         setLateProofError(data.message || 'Gagal memverifikasi bukti bayar.');
-        if (data.expired) {
-          setConfirmedRegistration(prev => prev ? { ...prev, paymentStatus: 'expired' } : null);
-        }
         onRefreshData();
         return;
       }
@@ -776,7 +751,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 onClick={() => setShowResumeBox(!showResumeBox)}
                 className="underline font-bold text-[#141414] hover:text-stone-700 cursor-pointer"
               >
-                Sudah daftar? Upload Bukti Bayar (Batas {event.paymentTimeoutHours || 2} Jam) →
+                Sudah daftar? Upload Bukti Bayar / Cek Antrian →
               </button>
             </div>
           </div>
@@ -2024,11 +1999,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                     </div>
                   )}
 
-                  {/* 2-Hour Warning Notice */}
-                  <div className="bg-amber-100/80 border border-amber-400 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-amber-950">
-                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  {/* Info Simpan Permanen (Tanpa Sistem Hangus) */}
+                  <div className="bg-sky-50 border border-sky-300 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-sky-950">
+                    <Clock className="w-4 h-4 text-sky-700 shrink-0 mt-0.5" />
                     <span>
-                      <strong>Info Penting:</strong> Jika belum bisa mengunggah bukti bayar sekarang, Anda dapat menyimpan pendaftaran terlebih dahulu dengan batas waktu <strong>{event.paymentTimeoutHours || 2} jam</strong> untuk melunasi & mengunggah bukti agar mendapat Nomor Antrian. Jika lewat {event.paymentTimeoutHours || 2} jam tanpa bukti bayar, formulir otomatis <strong>HANGUS</strong>.
+                      <strong>Info:</strong> Jika belum bisa mengunggah bukti bayar sekarang, Anda dapat menyimpan pendaftaran terlebih dahulu. Data pendaftaran tersimpan permanen (<strong>tidak hangus</strong>) dan Anda dapat mengunggah bukti bayar kapan saja untuk mengaktifkan Nomor Antrian.
                     </span>
                   </div>
                 </div>
@@ -2063,7 +2038,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                       className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-stone-100 hover:bg-stone-200 text-[#141414] border border-stone-300 font-bold px-5 py-3.5 rounded-2xl text-xs sm:text-sm transition-all"
                     >
                       <Clock className="w-4 h-4" />
-                      <span>Simpan Dulu (Bayar Maks {event.paymentTimeoutHours || 2} Jam)</span>
+                      <span>Simpan Dulu &amp; Upload Bukti Nanti</span>
                     </button>
                   )}
 
@@ -2090,69 +2065,28 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
             </div>
           )}
 
-          {/* ================= STEP 5: NOMOR ANTRIAN / 2-HOUR WARNING / EXPIRED ================= */}
+          {/* ================= STEP 5: NOMOR ANTRIAN / MENUNGGU UPLOAD BUKTI ================= */}
           {currentStep === 5 && confirmedRegistration && (
             <div className="space-y-6">
 
-              {/* CASE A: EXPIRED (> 2 Jam tanpa bukti bayar) */}
-              {confirmedRegistration.paymentStatus === 'expired' && (
-                <div className="bg-rose-50 border-2 border-rose-400 rounded-3xl p-6 sm:p-8 text-center space-y-4">
-                  <div className="w-16 h-16 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
-                    <AlertTriangle className="w-9 h-9" />
-                  </div>
-                  <h2 className="font-heading font-black text-2xl text-rose-900">
-                    Formulir Pendaftaran Hangus (Melewati Batas {event.paymentTimeoutHours || 2} Jam)
-                  </h2>
-                  <p className="text-sm text-rose-800 max-w-lg mx-auto">
-                    Pendaftaran atas nama <strong>{confirmedRegistration.ownerName}</strong> ({confirmedRegistration.petName}) untuk <strong>{confirmedRegistration.vaccineName}</strong> melewati batas waktu 2 jam tanpa bukti pembayaran, sehingga slot telah dikembalikan ke publik.
-                  </p>
-                  <p className="text-xs text-rose-700">
-                    Silakan mengisi ulang formulir atau memilih jenis vaksin lain yang masih tersedia.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConfirmedRegistration(null);
-                      setCurrentStep(1);
-                      onRefreshData();
-                    }}
-                    className="inline-flex items-center gap-2 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold px-6 py-3 rounded-2xl text-sm"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    <span>Isi Ulang Formulir / Pilih Vaksin Lain</span>
-                  </button>
-                </div>
-              )}
-
-              {/* CASE B: PENDING PAYMENT (2-Hour Countdown Warning + Inline Proof Upload) */}
-              {confirmedRegistration.paymentStatus === 'pending_payment' && (
+              {/* CASE A: PENDING PAYMENT (Tersimpan Permanen + Inline Proof Upload) */}
+              {(confirmedRegistration.paymentStatus === 'pending_payment' || confirmedRegistration.paymentStatus === 'expired') && (
                 <div className="space-y-6">
                   <div className="bg-amber-50 border-2 border-amber-500 rounded-3xl p-6 space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div className="flex items-start gap-3">
-                        <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0">
-                          <AlertTriangle className="w-6 h-6" />
-                        </div>
-                        <div>
-                          <span className="bg-amber-200 text-amber-950 text-[11px] font-black uppercase px-2.5 py-0.5 rounded-full">
-                            Peringatan Batas Waktu {event.paymentTimeoutHours || 2} Jam
-                          </span>
-                          <h2 className="font-heading font-black text-xl text-[#141414] mt-1">
-                            Segera Lakukan Payment Booking & Upload Bukti!
-                          </h2>
-                          <p className="text-xs sm:text-sm text-stone-700 mt-1">
-                            Data pendaftaran Anda (<strong>{confirmedRegistration.regNumber}</strong>) sudah tercatat untuk <strong>{confirmedRegistration.vaccineName}</strong>. Mohon segera unggah bukti payment booking sebelum batas waktu habis agar langsung memperoleh <strong>Nomor Antrian</strong>. Jika melewati 2 jam tanpa bukti bayar, formulir otomatis dianggap <strong>HANGUS</strong> dan Anda harus mengisi ulang atau memilih vaksin lain.
-                          </p>
-                        </div>
+                    <div className="flex items-start gap-3">
+                      <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0">
+                        <Clock className="w-6 h-6" />
                       </div>
-
-                      <div className="bg-[#141414] text-[#fff000] px-5 py-3 rounded-2xl text-center shrink-0 border-2 border-[#fff000]">
-                        <span className="text-[10px] font-bold uppercase tracking-wider block text-stone-300">
-                          Sisa Waktu Bayar
+                      <div>
+                        <span className="bg-amber-200 text-amber-950 text-[11px] font-black uppercase px-2.5 py-0.5 rounded-full">
+                          Menunggu Upload Bukti Pembayaran
                         </span>
-                        <span className="font-heading font-black text-2xl font-mono">
-                          {formatTimer(paymentDeadlineRemaining)}
-                        </span>
+                        <h2 className="font-heading font-black text-xl text-[#141414] mt-1">
+                          Data Tersimpan Permanen — Upload Bukti Payment Booking
+                        </h2>
+                        <p className="text-xs sm:text-sm text-stone-700 mt-1">
+                          Data pendaftaran Anda (<strong>{confirmedRegistration.regNumber}</strong>) sudah tercatat secara permanen untuk <strong>{confirmedRegistration.vaccineName}</strong> dan <strong>tidak akan hangus</strong>. Anda dapat mengunggah bukti payment booking kapan saja melalui form di bawah ini agar langsung memperoleh <strong>Nomor Antrian &amp; Barcode</strong>.
+                        </p>
                       </div>
                     </div>
 
