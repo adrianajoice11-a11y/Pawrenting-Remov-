@@ -10,6 +10,7 @@ export interface VaccineOption {
   category: 'kucing' | 'anjing' | 'semua';
   totalQuota: number;
   price: number; // in IDR
+  priceText?: string; // optional custom text pricing label (e.g. "Sesuai Berat Badan", "Bayar di Lokasi")
   description: string;
   minAgeMonths: number;
   active: boolean;
@@ -90,6 +91,8 @@ export interface Registration {
   vaccineId: string;
   vaccineName: string;
   vaccinePrice: number;
+  vaccinePriceText?: string;
+  vaccineNotes?: string;
   selectedSession: string; // e.g. "Pukul 12.00 - 14.00"
   rescheduledFromSession?: string;
   addOns?: {

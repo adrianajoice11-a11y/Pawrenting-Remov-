@@ -29,6 +29,7 @@ const DEFAULT_COLUMNS = [
   { key: 'petName', label: 'Nama Anabul yang akan divaksin', enabled: true },
   { key: 'petGender', label: 'Jenis Kelamin Anabul', enabled: true },
   { key: 'vaccineName', label: 'Pilih Vaksin', enabled: true },
+  { key: 'vaccineNotes', label: 'Keterangan Kebutuhan Tambahan', enabled: true },
   { key: 'selectedSession', label: 'Pemilihan kloter Pemeriksaan', enabled: true },
   { key: 'paymentProofUrl', label: 'Bukti Payment Booking', enabled: true },
   { key: 'paymentStatus', label: 'Status Booking', enabled: true },
@@ -83,6 +84,8 @@ export function extractColumnValue(r: Registration, key: string, forExcelQuote =
       return r.petAge || '-';
     case 'vaccineName':
       return r.vaccineName || '-';
+    case 'vaccineNotes':
+      return r.vaccineNotes || '-';
     case 'selectedSession':
       return r.selectedSession || '-';
     case 'paymentProofUrl':
@@ -165,8 +168,10 @@ export function exportGroupedSpreadsheetXLS(
   // Build vaccine groups preserving order of configured vaccines + any legacy vaccine names
   const groups: { title: string; rows: Registration[] }[] = [];
   if (groupByVaccine) {
+    const knownIds = new Set<string>();
     const knownNames = new Set<string>();
     vaccines.forEach(v => {
+      knownIds.add(v.id);
       knownNames.add(v.name);
       const matching = registrations.filter(r => r.vaccineId === v.id || r.vaccineName === v.name);
       groups.push({
@@ -174,7 +179,16 @@ export function exportGroupedSpreadsheetXLS(
         rows: matching,
       });
     });
-    const extraRegs = registrations.filter(r => !knownNames.has(r.vaccineName));
+    const noVaccineRegs = registrations.filter(r => r.vaccineId === 'no-vaccine' || r.vaccineId === 'none');
+    if (noVaccineRegs.length > 0) {
+      groups.push({
+        title: `${prefix}: Tidak Memilih Vaksin (Keperluan Lainnya) — ${noVaccineRegs.length} Peserta`,
+        rows: noVaccineRegs,
+      });
+    }
+    const extraRegs = registrations.filter(
+      r => !knownIds.has(r.vaccineId) && !knownNames.has(r.vaccineName) && r.vaccineId !== 'no-vaccine' && r.vaccineId !== 'none'
+    );
     if (extraRegs.length > 0) {
       groups.push({
         title: `${prefix}: Lainnya — ${extraRegs.length} Peserta`,

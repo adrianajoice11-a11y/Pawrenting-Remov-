@@ -46,6 +46,32 @@ export default function App() {
 
   useEffect(() => {
     fetchEventData();
+
+    // Real-time SSE listener so any Admin change updates all clients immediately
+    let evtSource: EventSource | null = null;
+    if (typeof EventSource !== 'undefined') {
+      evtSource = new EventSource('/api/events/stream');
+      evtSource.onmessage = (msg) => {
+        try {
+          const parsed = JSON.parse(msg.data);
+          if (parsed?.type === 'update') {
+            fetchEventData();
+          }
+        } catch {
+          // Ignore heartbeat / malformed frames
+        }
+      };
+    }
+
+    // Cross-tab instant sync within same browser
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      bc = new BroadcastChannel('remov_event_sync');
+      bc.onmessage = () => {
+        fetchEventData();
+      };
+    }
+
     const interval = setInterval(() => {
       fetchEventData();
     }, 8000);
@@ -58,14 +84,24 @@ export default function App() {
     document.addEventListener('visibilitychange', handleFocusRefresh);
     return () => {
       clearInterval(interval);
+      evtSource?.close();
+      bc?.close();
       window.removeEventListener('focus', fetchEventData);
       document.removeEventListener('visibilitychange', handleFocusRefresh);
     };
   }, []);
 
+  // Sync browser tab title & meta description with latest Admin event configuration
+  useEffect(() => {
+    if (!event) return;
+    const titleSuffix = event.partnerName ? ` × ${event.partnerName}` : '';
+    document.title = `${event.title}${titleSuffix} — ${event.subtitle || 'Formulir Pendaftaran'}`;
+  }, [event?.title, event?.partnerName, event?.subtitle]);
+
   const handleTabChange = (targetTab: 'form' | 'ticket' | 'admin') => {
     if (targetTab === 'form') {
       setActiveTab('form');
+      fetchEventData();
       return;
     }
 
@@ -206,10 +242,10 @@ export default function App() {
             )}
             <div>
               <span className="font-heading font-bold text-[#141414] block">
-                Pawrenting REMOV Official Care {event?.partnerName ? `× ${event.partnerName}` : ''}
+                {event?.title || 'Pawrenting REMOV Official Care'}{event?.partnerName ? ` × ${event.partnerName}` : ''}
               </span>
               <span className="text-stone-400">
-                Solusi Perawatan & Vaksinasi Sehat untuk Kucing & Anjing Kesayangan
+                {event?.subtitle || 'Solusi Perawatan & Vaksinasi Sehat untuk Kucing & Anjing Kesayangan'}
               </span>
             </div>
           </div>

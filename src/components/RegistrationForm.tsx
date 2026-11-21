@@ -51,14 +51,16 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   const [previousVaccineHistory, setPreviousVaccineHistory] = useState('Belum pernah vaksin');
 
   // Dynamic Health Checklist Answers keyed by item.id
-  const checklistItems = event.healthChecklistItems && event.healthChecklistItems.length > 0
+  const checklistItems = Array.isArray(event.healthChecklistItems)
     ? event.healthChecklistItems
     : (event.termsAndConditions || []).map((text, idx) => ({ id: `chk-${idx + 1}`, text, required: true }));
 
   const [checklistChecked, setChecklistChecked] = useState<Record<string, boolean>>({});
 
   // Vaccine & Session State
+  const NO_VACCINE_ID = 'no-vaccine';
   const [selectedVaccineId, setSelectedVaccineId] = useState<string>('');
+  const [vaccineNotes, setVaccineNotes] = useState<string>('');
   const [selectedSession, setSelectedSession] = useState<string>(event.sessions[0] || 'Pukul 09.00 - 12.00 WIB (Kloter 1)');
 
   // Lock Quota (Hold) State
@@ -97,6 +99,87 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   const [isSubmittingLateProof, setIsSubmittingLateProof] = useState<boolean>(false);
   const [lateProofError, setLateProofError] = useState<string | null>(null);
 
+  // Returning customer saved registration references on this device (read-only server lookup)
+  interface SavedRegistrationRef {
+    id: string;
+    regNumber: string;
+    queueNumber?: string;
+    petName: string;
+    ownerName: string;
+    vaccineName: string;
+    createdAt: string;
+  }
+  const SAVED_REGS_KEY = 'remov_my_registrations_v1';
+  const [savedRegRefs, setSavedRegRefs] = useState<SavedRegistrationRef[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = localStorage.getItem(SAVED_REGS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [loadingSavedRegId, setLoadingSavedRegId] = useState<string | null>(null);
+  const [savedRegError, setSavedRegError] = useState<string | null>(null);
+
+  const persistRegistrationRef = (reg: Registration) => {
+    const nextRef: SavedRegistrationRef = {
+      id: reg.id,
+      regNumber: reg.regNumber,
+      queueNumber: reg.queueNumber,
+      petName: reg.petName,
+      ownerName: reg.ownerName,
+      vaccineName: reg.vaccineName,
+      createdAt: reg.createdAt,
+    };
+    setSavedRegRefs((prev) => {
+      const filtered = prev.filter((item) => item.id !== reg.id);
+      const updated = [nextRef, ...filtered].slice(0, 10);
+      try {
+        localStorage.setItem(SAVED_REGS_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage quota errors
+      }
+      return updated;
+    });
+  };
+
+  const removeSavedRegistrationRef = (id: string) => {
+    setSavedRegRefs((prev) => {
+      const updated = prev.filter((item) => item.id !== id);
+      try {
+        localStorage.setItem(SAVED_REGS_KEY, JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors
+      }
+      return updated;
+    });
+  };
+
+  const handleOpenSavedRegistration = async (refItem: SavedRegistrationRef) => {
+    setLoadingSavedRegId(refItem.id);
+    setSavedRegError(null);
+    try {
+      const res = await fetch(`/api/registrations/${encodeURIComponent(refItem.id)}?_t=${Date.now()}`, {
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || !data.registration) {
+        removeSavedRegistrationRef(refItem.id);
+        setSavedRegError(`Data pendaftaran ${refItem.regNumber} sudah tidak berada di event aktif saat ini (kemungkinan sudah diarsipkan oleh panitia).`);
+        return;
+      }
+      persistRegistrationRef(data.registration);
+      setConfirmedRegistration(data.registration);
+      setCurrentStep(5);
+    } catch {
+      setSavedRegError('Gagal memuat data pendaftaran tersimpan. Silakan coba lagi.');
+    } finally {
+      setLoadingSavedRegId(null);
+    }
+  };
+
   const availableVaccines = vaccines.filter(v => v.active !== false);
 
   useEffect(() => {
@@ -112,9 +195,14 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   }, [availableVaccines, petType, selectedVaccineId]);
 
   useEffect(() => {
-    if (activeBankAccounts.length > 0 && !selectedBankTarget) {
-      setSelectedBankTarget(`${activeBankAccounts[0].bankName} (${activeBankAccounts[0].accountNumber})`);
-      setPaymentMethod(activeBankAccounts[0].bankName);
+    if (activeBankAccounts.length > 0) {
+      const stillValid = activeBankAccounts.some(b => selectedBankTarget.includes(b.accountNumber));
+      if (!selectedBankTarget || !stillValid) {
+        setSelectedBankTarget(`${activeBankAccounts[0].bankName} (${activeBankAccounts[0].accountNumber})`);
+        setPaymentMethod(activeBankAccounts[0].bankName);
+      }
+    } else if (selectedBankTarget) {
+      setSelectedBankTarget('');
     }
   }, [activeBankAccounts, selectedBankTarget]);
 
@@ -193,8 +281,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     }
   }, [confirmedRegistration?.id, confirmedRegistration?.paymentStatus, confirmedRegistration?.queueNumber, event.date]);
 
+  const isNoVaccineSelected = selectedVaccineId === NO_VACCINE_ID;
   const selectedVaccine = availableVaccines.find(v => v.id === selectedVaccineId);
-  const grandTotal = selectedVaccine?.price || 0;
+  const grandTotal = isNoVaccineSelected ? 0 : (selectedVaccine?.price || 0);
 
   const validateStep1 = () => {
     if (!ownerName.trim()) {
@@ -236,8 +325,20 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   };
 
   const handleProceedToLockAndPayment = async () => {
+    if (isNoVaccineSelected) {
+      if (!vaccineNotes.trim()) {
+        setLockError('Mohon tuliskan keterangan tujuan atau kebutuhan Anda di kolom keterangan karena Anda tidak memilih vaksin.');
+        return;
+      }
+      setLockError(null);
+      setHoldId(null);
+      setHoldExpiresAt(null);
+      setCurrentStep(4);
+      return;
+    }
+
     if (!selectedVaccine) {
-      setLockError('Silakan pilih salah satu jenis vaksin.');
+      setLockError('Silakan pilih salah satu jenis vaksin atau opsi "Tidak Memilih Vaksin (Keperluan Lainnya)".');
       return;
     }
     if (selectedVaccine.isSoldOut) {
@@ -353,11 +454,12 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
           checked: !!checklistChecked[item.id]
         })),
         vaccineId: selectedVaccineId,
+        vaccineNotes: vaccineNotes.trim(),
         selectedSession,
         totalAmount: grandTotal,
-        paymentMethod,
-        paymentBankTarget: selectedBankTarget,
-        paymentProofUrl: finalProofUrl,
+        paymentMethod: grandTotal === 0 ? 'Tanpa Biaya' : paymentMethod,
+        paymentBankTarget: grandTotal === 0 ? '' : selectedBankTarget,
+        paymentProofUrl: grandTotal === 0 ? '' : finalProofUrl,
         joinedWhatsAppGroup: hasJoinedWhatsApp,
       };
 
@@ -374,6 +476,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       }
 
       setConfirmedRegistration(data.registration);
+      persistRegistrationRef(data.registration);
       setHoldId(null);
       setHoldExpiresAt(null);
       setCurrentStep(5);
@@ -416,6 +519,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         return;
       }
       setConfirmedRegistration(data.registration);
+      persistRegistrationRef(data.registration);
       onRefreshData();
     } catch (err: any) {
       setLateProofError(err.message || 'Gagal mengirim bukti pembayaran.');
@@ -430,13 +534,16 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     setIsSearchingResume(true);
     setResumeError(null);
     try {
-      const res = await fetch(`/api/registrations/${encodeURIComponent(resumeQuery.trim())}`);
+      const res = await fetch(`/api/registrations/${encodeURIComponent(resumeQuery.trim())}?_t=${Date.now()}`, {
+        cache: 'no-store',
+      });
       const data = await res.json();
       if (!res.ok || !data.success) {
         setResumeError(data.message || 'Data pendaftaran tidak ditemukan.');
         return;
       }
       setConfirmedRegistration(data.registration);
+      persistRegistrationRef(data.registration);
       setCurrentStep(5);
       setShowResumeBox(false);
     } catch (err: any) {
@@ -467,6 +574,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     setPetBreed('');
     setPetAge('');
     setChecklistChecked({});
+    setVaccineNotes('');
     setPaymentProofData('');
     setPaymentProofName('');
     setPaymentProofLink('');
@@ -478,7 +586,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     setCurrentStep(2);
   };
 
-  const bgImageUrl = event.backgroundImageUrl || '/backgrounds/pawrenting-kuning-remov.svg';
+  const bgImageUrl = event.backgroundImageUrl !== undefined
+    ? event.backgroundImageUrl
+    : '/backgrounds/pawrenting-kuning-remov.svg';
   const overlayOpacity = event.backgroundOverlayOpacity ?? 78;
 
   // Root div of RegistrationForm matches Focus Mode selector:
@@ -494,9 +604,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         style={{ backgroundColor: `rgba(254, 253, 245, ${overlayOpacity / 100})` }}
       />
 
-      <div className="relative z-10 max-w-4xl mx-auto px-4 py-6 md:py-10">
+      <div className="relative z-10 max-w-4xl mx-auto px-3 sm:px-4 py-4 sm:py-6 md:py-10">
         {/* Event Hero Card in Signature REMOV Yellow (#fff000) & Charcoal (#141414) */}
-        <div className="bg-linear-to-br from-[#fff000] via-[#fde047] to-[#facc15] rounded-3xl p-6 sm:p-8 text-[#141414] border-2 border-[#141414] shadow-xl mb-8 relative overflow-hidden">
+        <div className="bg-linear-to-br from-[#fff000] via-[#fde047] to-[#facc15] rounded-2xl sm:rounded-3xl p-4 sm:p-8 text-[#141414] border-2 border-[#141414] shadow-xl mb-6 sm:mb-8 relative overflow-hidden">
           <div className="absolute right-4 -bottom-6 text-[#141414]/10 select-none pointer-events-none transform rotate-12">
             <PawPrint className="w-64 h-64" />
           </div>
@@ -608,28 +718,46 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
             )}
 
             {/* Real-time Quota Badges Bar */}
-            <div className="bg-[#141414] text-white rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-              <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#fff000]">
-                Status Kuota Vaksin Hari Ini:
-              </span>
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="bg-[#141414] text-white rounded-2xl p-3.5 sm:p-4 space-y-2.5 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#fff000]">
+                  Status Kuota Vaksin Hari Ini:
+                </span>
+                <span className="text-[11px] text-stone-300 font-medium">
+                  Update otomatis real-time
+                </span>
+              </div>
+              <div className="grid grid-cols-1 xs:grid-cols-2 sm:flex sm:flex-wrap items-stretch gap-2">
                 {availableVaccines.map((v) => {
-                  const sisa = v.availableQuota ?? v.totalQuota;
+                  const total = v.totalQuota || 0;
+                  const sisa = v.availableQuota ?? total;
+                  const held = v.heldCount ?? 0;
                   const habis = sisa <= 0;
                   return (
                     <div
                       key={v.id}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold ${
+                      className={`inline-flex items-center justify-between sm:justify-start gap-2 px-3 py-1.5 rounded-xl text-xs font-bold ${
                         habis
-                          ? 'bg-rose-600 text-white'
-                          : 'bg-white/15 text-white border border-white/20'
+                          ? 'bg-rose-600 text-white border border-rose-400'
+                          : sisa <= 5
+                          ? 'bg-amber-500/20 text-white border border-amber-400/60'
+                          : 'bg-white/12 text-white border border-white/20'
                       }`}
                     >
-                      <span>{v.category === 'anjing' ? '🐶' : '🐱'}</span>
-                      <span>{v.code}:</span>
-                      <strong className={habis ? 'text-white' : 'text-[#fff000]'}>
-                        {habis ? 'KUOTA HABIS' : `Sisa ${sisa}/${v.totalQuota}`}
-                      </strong>
+                      <span className="inline-flex items-center gap-1.5 truncate">
+                        <span>{v.category === 'anjing' ? '🐶' : v.category === 'kucing' ? '🐱' : '🐾'}</span>
+                        <span className="truncate">{v.code}</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 shrink-0">
+                        <strong className={habis ? 'text-white' : 'text-[#fff000]'}>
+                          {habis ? `HABIS (0/${total})` : `Sisa ${sisa}/${total}`}
+                        </strong>
+                        {!habis && held > 0 && (
+                          <span className="text-[10px] bg-amber-400 text-[#141414] px-1.5 py-0.5 rounded font-extrabold">
+                            Hold {held}
+                          </span>
+                        )}
+                      </span>
                     </div>
                   );
                 })}
@@ -648,11 +776,84 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 onClick={() => setShowResumeBox(!showResumeBox)}
                 className="underline font-bold text-[#141414] hover:text-stone-700 cursor-pointer"
               >
-                Sudah daftar? Upload Bukti Bayar (Batas 2 Jam) →
+                Sudah daftar? Upload Bukti Bayar (Batas {event.paymentTimeoutHours || 2} Jam) →
               </button>
             </div>
           </div>
         </div>
+
+        {/* Returning Customer Saved Registrations Banner (Read-Only Snapshot Access) */}
+        {savedRegRefs.length > 0 && currentStep < 5 && (
+          <div className="bg-white/95 backdrop-blur-xs rounded-2xl sm:rounded-3xl p-4 sm:p-5 border-2 border-[#141414] shadow-md mb-6 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="w-7 h-7 rounded-xl bg-[#fff000] border border-[#141414] flex items-center justify-center shrink-0">
+                  <QrCode className="w-4 h-4 text-[#141414]" />
+                </span>
+                <div>
+                  <h3 className="font-heading font-extrabold text-xs sm:text-sm text-[#141414]">
+                    Data Pendaftaran Tersimpan di Perangkat Ini
+                  </h3>
+                  <p className="text-[11px] text-stone-500">
+                    Data Anda tersimpan permanen & tidak berubah. Klik untuk membuka kembali Nomor Antrian & Barcode kapan saja.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {savedRegError && (
+              <div className="bg-amber-50 border border-amber-300 text-amber-900 px-3 py-2 rounded-xl text-xs font-medium">
+                {savedRegError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {savedRegRefs.slice(0, 4).map((refItem) => (
+                <div
+                  key={refItem.id}
+                  className="flex items-center justify-between gap-2 p-3 rounded-2xl bg-yellow-50/70 border border-[#141414]/25"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {refItem.queueNumber && (
+                        <span className="bg-[#141414] text-[#fff000] text-[10px] font-black px-2 py-0.5 rounded-md">
+                          Antrian #{refItem.queueNumber}
+                        </span>
+                      )}
+                      <span className="font-mono text-[11px] font-bold text-stone-700 truncate">
+                        {refItem.regNumber}
+                      </span>
+                    </div>
+                    <p className="font-bold text-xs text-[#141414] truncate mt-1">
+                      {refItem.ownerName} — {refItem.petName}
+                    </p>
+                    <p className="text-[11px] text-stone-600 truncate">
+                      {refItem.vaccineName}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={loadingSavedRegId === refItem.id}
+                      onClick={() => handleOpenSavedRegistration(refItem)}
+                      className="bg-[#fff000] hover:bg-yellow-300 text-[#141414] border border-[#141414] font-extrabold text-[11px] px-3 py-1.5 rounded-xl cursor-pointer"
+                    >
+                      {loadingSavedRegId === refItem.id ? 'Memuat...' : 'Lihat Tiket'}
+                    </button>
+                    <button
+                      type="button"
+                      title="Sembunyikan pintasan dari perangkat ini"
+                      onClick={() => removeSavedRegistrationRef(refItem.id)}
+                      className="text-stone-400 hover:text-stone-700 px-1.5 py-1 text-xs"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Resume Unpaid Booking Box */}
         {showResumeBox && (
@@ -691,8 +892,8 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
 
         {/* Step Progress Indicator */}
         {currentStep < 5 && (
-          <div className="mb-8 bg-white/90 backdrop-blur-sm rounded-3xl p-4 sm:p-5 border border-stone-200 shadow-xs">
-            <div className="flex items-center justify-between">
+          <div className="mb-6 sm:mb-8 bg-white/90 backdrop-blur-sm rounded-2xl sm:rounded-3xl p-3 sm:p-5 border border-stone-200 shadow-xs">
+            <div className="flex items-center justify-between gap-1">
               {[
                 { num: 1, title: 'Data Pawrent', desc: 'Identitas Pemilik' },
                 { num: 2, title: 'Anabul & Syarat', desc: 'Profil & Checklist' },
@@ -702,9 +903,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 const isActive = currentStep === step.num;
                 const isPast = currentStep > step.num;
                 return (
-                  <div key={step.num} className="flex-1 flex flex-col items-center relative text-center">
+                  <div key={step.num} className="flex-1 flex flex-col items-center relative text-center min-w-0 px-0.5">
                     <div
-                      className={`w-9 h-9 sm:w-11 sm:h-11 rounded-2xl flex items-center justify-center font-extrabold text-sm transition-all duration-300 z-10 ${
+                      className={`w-8 h-8 sm:w-11 sm:h-11 rounded-xl sm:rounded-2xl flex items-center justify-center font-extrabold text-xs sm:text-sm transition-all duration-300 z-10 ${
                         isActive
                           ? 'bg-[#fff000] text-[#141414] border-2 border-[#141414] shadow-md scale-105'
                           : isPast
@@ -712,9 +913,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                           : 'bg-stone-200 text-stone-500'
                       }`}
                     >
-                      {isPast ? <Check className="w-5 h-5" /> : step.num}
+                      {isPast ? <Check className="w-4 h-4 sm:w-5 sm:h-5" /> : step.num}
                     </div>
-                    <span className={`text-xs mt-2 font-bold ${isActive ? 'text-[#141414]' : isPast ? 'text-emerald-700' : 'text-stone-400'}`}>
+                    <span className={`text-[10px] sm:text-xs mt-1.5 sm:mt-2 font-bold leading-tight ${isActive ? 'text-[#141414]' : isPast ? 'text-emerald-700' : 'text-stone-400'}`}>
                       {step.title}
                     </span>
                     <span className="hidden md:inline text-[11px] text-stone-500 font-normal">
@@ -736,7 +937,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         )}
 
         {/* Main Form Card Container */}
-        <div className="bg-white rounded-3xl p-6 sm:p-8 border-2 border-[#141414]/15 shadow-xl">
+        <div className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-8 border-2 border-[#141414]/15 shadow-xl">
 
           {submitError && currentStep < 5 && (
             <div className="mb-6 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl p-4 flex items-start gap-3 text-sm">
@@ -1216,8 +1417,8 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 </label>
 
                 {availableVaccines.length === 0 ? (
-                  <div className="p-8 text-center text-stone-400 bg-stone-50 rounded-2xl border border-stone-200">
-                    <p className="font-semibold text-stone-600">Saat ini belum ada vaksin yang diaktifkan oleh admin.</p>
+                  <div className="p-6 text-center text-stone-500 bg-stone-50 rounded-2xl border border-stone-200">
+                    <p className="font-semibold text-stone-600 text-sm">Saat ini belum ada pilihan vaksin aktif. Anda tetap dapat mendaftar menggunakan opsi Keperluan Lainnya di bawah ini.</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-4">
@@ -1236,6 +1437,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                           onClick={() => {
                             if (!isSoldOut && isCompatible && vac.active) {
                               setSelectedVaccineId(vac.id);
+                              setLockError(null);
                             }
                           }}
                           className={`relative rounded-3xl p-5 border-2 transition-all ${
@@ -1290,8 +1492,12 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                             <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-2 shrink-0 pt-2 sm:pt-0">
                               <div className="text-left sm:text-right">
                                 <span className="text-xs text-stone-400 block font-normal">Biaya Booking Vaksin</span>
-                                <span className="font-heading font-black text-lg text-[#141414]">
-                                  {vac.price === 0 ? 'GRATIS' : `Rp ${vac.price.toLocaleString('id-ID')}`}
+                                <span className={`font-heading font-black text-[#141414] ${vac.priceText?.trim() ? 'text-sm sm:text-base' : 'text-lg'}`}>
+                                  {vac.priceText?.trim()
+                                    ? vac.priceText.trim()
+                                    : vac.price === 0
+                                    ? 'GRATIS'
+                                    : `Rp ${vac.price.toLocaleString('id-ID')}`}
                                 </span>
                               </div>
 
@@ -1307,14 +1513,17 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                             </div>
                           </div>
 
-                          <div className="mt-4 pt-3 border-t border-stone-100">
-                            <div className="flex items-center justify-between text-xs mb-1">
-                              <span className="text-stone-500">Status Kuota Real-Time:</span>
-                              <span className="font-bold text-stone-700">
-                                {isSoldOut ? '0 ekor tersisa' : `Sisa ${available} dari total ${vac.totalQuota} kuota`}
+                          <div className="mt-4 pt-3 border-t border-stone-200/80 space-y-2">
+                            <div className="flex items-center justify-between flex-wrap gap-1.5 text-xs">
+                              <span className="font-bold text-stone-700">Rincian Kuota Real-Time:</span>
+                              <span className={`font-extrabold ${isSoldOut ? 'text-rose-700' : isLowQuota ? 'text-amber-700' : 'text-emerald-700'}`}>
+                                {isSoldOut
+                                  ? `KUOTA HABIS (0 / ${vac.totalQuota} tersisa)`
+                                  : `Sisa ${available} dari ${vac.totalQuota} kuota (${percentLeft}%)`}
                               </span>
                             </div>
-                            <div className="w-full h-2 rounded-full bg-stone-100 overflow-hidden">
+
+                            <div className="w-full h-2.5 rounded-full bg-stone-200 overflow-hidden">
                               <div
                                 className={`h-full transition-all duration-500 ${
                                   isSoldOut
@@ -1326,24 +1535,159 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                                 style={{ width: `${isSoldOut ? 100 : percentLeft}%` }}
                               />
                             </div>
+
+                            <div className="grid grid-cols-3 gap-2 pt-1 text-[11px]">
+                              <div className={`px-2.5 py-1.5 rounded-xl border text-center ${
+                                isSoldOut
+                                  ? 'bg-rose-50 border-rose-200 text-rose-800'
+                                  : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                              }`}>
+                                <span className="block text-[10px] text-stone-500 font-semibold">Sisa Kuota</span>
+                                <strong className="font-heading text-xs sm:text-sm">{available} ekor</strong>
+                              </div>
+                              <div className="px-2.5 py-1.5 rounded-xl bg-stone-50 border border-stone-200 text-center text-[#141414]">
+                                <span className="block text-[10px] text-stone-500 font-semibold">
+                                  {(vac.heldCount ?? 0) > 0 ? 'Terisi / Hold' : 'Sudah Terisi'}
+                                </span>
+                                <strong className="font-heading text-xs sm:text-sm">
+                                  {vac.confirmedCount ?? Math.max(0, vac.totalQuota - available)}
+                                  {(vac.heldCount ?? 0) > 0 ? ` (+${vac.heldCount} hold)` : ''} ekor
+                                </strong>
+                              </div>
+                              <div className="px-2.5 py-1.5 rounded-xl bg-stone-50 border border-stone-200 text-center text-[#141414]">
+                                <span className="block text-[10px] text-stone-500 font-semibold">Total Kuota</span>
+                                <strong className="font-heading text-xs sm:text-sm">{vac.totalQuota} ekor</strong>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       );
                     })}
                   </div>
                 )}
+
+                {/* Opsi Tidak Memilih Vaksin / Keperluan Lainnya */}
+                <div
+                  onClick={() => {
+                    setSelectedVaccineId(NO_VACCINE_ID);
+                    setLockError(null);
+                  }}
+                  className={`relative rounded-3xl p-5 border-2 transition-all cursor-pointer ${
+                    isNoVaccineSelected
+                      ? 'border-[#141414] bg-yellow-50/90 shadow-md ring-3 ring-[#fff000]'
+                      : 'border-dashed border-stone-300 bg-stone-50/60 hover:border-[#141414]/60 hover:bg-white'
+                  }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center flex-wrap gap-2">
+                        <h3 className="font-heading font-bold text-base sm:text-lg text-[#141414]">
+                          Tidak Memilih Vaksin (Keperluan / Keterangan Lainnya)
+                        </h3>
+                        <span className="bg-stone-200 text-[#141414] text-[11px] font-extrabold px-2.5 py-0.5 rounded-full border border-stone-300">
+                          Opsional • Non-Vaksin
+                        </span>
+                      </div>
+                      <p className="text-xs text-stone-600 max-w-xl">
+                        Pilih opsi ini jika Anda tidak membutuhkan vaksinasi, namun tetap ingin mendaftar untuk keperluan atau kebutuhan lain dengan menuliskan keterangannya di bawah.
+                      </p>
+                    </div>
+
+                    <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-2 shrink-0 pt-2 sm:pt-0">
+                      <div className="text-left sm:text-right">
+                        <span className="text-xs text-stone-400 block font-normal">Biaya Pendaftaran</span>
+                        <span className="font-heading font-black text-lg text-[#141414]">
+                          GRATIS
+                        </span>
+                      </div>
+
+                      <div
+                        className={`w-6 h-6 rounded-full flex items-center justify-center border-2 transition-all ${
+                          isNoVaccineSelected
+                            ? 'bg-[#fff000] border-[#141414] text-[#141414]'
+                            : 'border-stone-300 bg-white'
+                        }`}
+                      >
+                        {isNoVaccineSelected && <Check className="w-3.5 h-3.5 stroke-3" />}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Kolom Keterangan Tambahan / Kebutuhan Peserta */}
+              <div
+                className={`rounded-2xl sm:rounded-3xl p-4 sm:p-5 border-2 transition-all space-y-2.5 ${
+                  isNoVaccineSelected
+                    ? 'bg-yellow-50/90 border-[#141414] shadow-xs'
+                    : 'bg-stone-50/80 border-stone-200'
+                }`}
+              >
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <label className="block text-xs font-extrabold text-[#141414] uppercase tracking-wider">
+                    Keterangan / Kebutuhan Tambahan Peserta{' '}
+                    {isNoVaccineSelected ? (
+                      <span className="text-rose-600">* (Wajib Diisi)</span>
+                    ) : (
+                      <span className="text-stone-400 font-semibold normal-case">(Opsional)</span>
+                    )}
+                  </label>
+                  {isNoVaccineSelected && (
+                    <span className="bg-[#141414] text-[#fff000] text-[10px] font-extrabold px-2.5 py-0.5 rounded-full">
+                      Tujuan Non-Vaksin
+                    </span>
+                  )}
+                </div>
+
+                <p className="text-xs text-stone-600 leading-relaxed">
+                  {isNoVaccineSelected
+                    ? 'Karena Anda tidak memilih vaksin, silakan ketik kebutuhan, keluhan anabul, atau tujuan pendaftaran Anda pada kolom di bawah ini.'
+                    : 'Tuliskan kebutuhan tambahan atau catatan khusus untuk panitia/dokter hewan jika ada (misalnya: sekalian cek kulit/telinga, konsultasi vitamin, riwayat alergi, dll).'}
+                </p>
+
+                <textarea
+                  rows={3}
+                  value={vaccineNotes}
+                  onChange={(e) => {
+                    setVaccineNotes(e.target.value);
+                    if (lockError) setLockError(null);
+                  }}
+                  placeholder={
+                    isNoVaccineSelected
+                      ? 'Ketik tujuan atau kebutuhan Anda di sini... Contoh: Ingin konsultasi kesehatan kulit anabul / cek telinga / hadir edukasi pawrenting'
+                      : 'Contoh: Sekalian konsultasi bulu rontok atau kebutuhan tambahan lainnya (kosongkan jika tidak ada)'
+                  }
+                  className={`w-full px-4 py-3 rounded-2xl border-2 outline-hidden text-xs sm:text-sm bg-white transition-all resize-y ${
+                    isNoVaccineSelected && !vaccineNotes.trim()
+                      ? 'border-amber-500 focus:border-[#141414] focus:ring-3 focus:ring-[#fff000]/50'
+                      : 'border-stone-200 focus:border-[#141414] focus:ring-3 focus:ring-[#fff000]/40'
+                  }`}
+                />
               </div>
 
               {/* Sticky Summary */}
               <div className="bg-[#141414] text-white rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-md">
-                <div>
-                  <span className="text-stone-400 text-xs block">Total Biaya Booking Vaksin:</span>
-                  <span className="font-heading font-black text-2xl text-[#fff000]">
-                    {grandTotal === 0 ? 'GRATIS (Rp 0)' : `Rp ${grandTotal.toLocaleString('id-ID')}`}
+                <div className="w-full sm:w-auto">
+                  <span className="text-stone-400 text-xs block">
+                    {isNoVaccineSelected ? 'Total Biaya Pendaftaran:' : 'Total Biaya Booking Vaksin:'}
+                  </span>
+                  <span className="font-heading font-black text-xl sm:text-2xl text-[#fff000]">
+                    {grandTotal === 0
+                      ? (!isNoVaccineSelected && selectedVaccine?.priceText?.trim()
+                          ? selectedVaccine.priceText.trim()
+                          : 'GRATIS (Rp 0)')
+                      : `Rp ${grandTotal.toLocaleString('id-ID')}`}
                   </span>
                   <span className="text-[11px] text-stone-300 block">
-                    {selectedVaccine?.name || 'Belum memilih vaksin'} • {selectedSession}
+                    {isNoVaccineSelected
+                      ? 'Tidak Memilih Vaksin (Keperluan Lainnya)'
+                      : (selectedVaccine?.name || 'Belum memilih vaksin')} • {selectedSession}
                   </span>
+                  {vaccineNotes.trim() && (
+                    <span className="text-[11px] text-[#fff000] block truncate max-w-md mt-0.5">
+                      Catatan: {vaccineNotes.trim()}
+                    </span>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -1356,7 +1700,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                   </button>
                   <button
                     type="button"
-                    disabled={isLockingQuota || !selectedVaccine || selectedVaccine.isSoldOut}
+                    disabled={isLockingQuota || (!isNoVaccineSelected && (!selectedVaccine || selectedVaccine.isSoldOut))}
                     onClick={handleProceedToLockAndPayment}
                     className="flex-1 sm:flex-none inline-flex items-center justify-center gap-2 bg-[#fff000] hover:bg-yellow-300 disabled:bg-stone-700 disabled:text-stone-500 text-[#141414] font-extrabold px-6 py-3.5 rounded-xl shadow-md transition-all text-sm group cursor-pointer"
                   >
@@ -1364,6 +1708,12 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
                         <span>Mengunci Kuota...</span>
+                      </>
+                    ) : isNoVaccineSelected ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Lanjut Konfirmasi Pendaftaran</span>
+                        <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                       </>
                     ) : (
                       <>
@@ -1381,34 +1731,52 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
           {/* ================= STEP 4: KUNCI KUOTA & PAYMENT PROOF (AUTO-VERIFIED) ================= */}
           {currentStep === 4 && (
             <div className="space-y-6">
-              {/* Hold Banner */}
-              <div className="bg-[#141414] text-white rounded-3xl p-5 shadow-lg border-2 border-[#fff000] pulse-glow">
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                  <div className="flex items-center gap-3 text-center sm:text-left">
+              {/* Hold / Non-Vaccine Banner */}
+              {holdId ? (
+                <div className="bg-[#141414] text-white rounded-3xl p-5 shadow-lg border-2 border-[#fff000] pulse-glow">
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 text-center sm:text-left">
+                      <div className="w-12 h-12 rounded-2xl bg-[#fff000] text-[#141414] flex items-center justify-center shrink-0">
+                        <Lock className="w-6 h-6" />
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-center sm:justify-start gap-2">
+                          <span className="font-heading font-bold text-lg text-[#fff000]">KUOTA ANDA SEDANG TERKUNCI!</span>
+                          <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+                        </div>
+                        <p className="text-xs text-stone-300 max-w-lg">
+                          1 slot untuk <strong>{selectedVaccine?.name}</strong> atas nama anabul <strong>{petName}</strong> sedang dikunci khusus untuk Anda.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="bg-white/10 px-5 py-2.5 rounded-2xl border border-white/20 text-center shrink-0">
+                      <span className="text-[10px] uppercase font-bold tracking-wider text-[#fff000] block">
+                        Sisa Waktu Hold
+                      </span>
+                      <span className="font-heading font-black text-2xl tracking-wider font-mono text-white">
+                        {formatTimer(remainingSeconds)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-[#141414] text-white rounded-3xl p-5 shadow-lg border-2 border-[#fff000]">
+                  <div className="flex items-center gap-3">
                     <div className="w-12 h-12 rounded-2xl bg-[#fff000] text-[#141414] flex items-center justify-center shrink-0">
-                      <Lock className="w-6 h-6" />
+                      <CheckCircle2 className="w-6 h-6" />
                     </div>
                     <div>
-                      <div className="flex items-center justify-center sm:justify-start gap-2">
-                        <span className="font-heading font-bold text-lg text-[#fff000]">KUOTA ANDA SEDANG TERKUNCI!</span>
-                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
-                      </div>
-                      <p className="text-xs text-stone-300 max-w-lg">
-                        1 slot untuk <strong>{selectedVaccine?.name}</strong> atas nama anabul <strong>{petName}</strong> sedang dikunci khusus untuk Anda.
+                      <span className="font-heading font-bold text-base sm:text-lg text-[#fff000] block">
+                        PENDAFTARAN NON-VAKSIN / KEPERLUAN LAINNYA
+                      </span>
+                      <p className="text-xs text-stone-300">
+                        Kebutuhan Anda atas nama anabul <strong>{petName}</strong> telah dicatat. Silakan periksa ringkasan dan konfirmasi pendaftaran di bawah ini.
                       </p>
                     </div>
                   </div>
-
-                  <div className="bg-white/10 px-5 py-2.5 rounded-2xl border border-white/20 text-center shrink-0">
-                    <span className="text-[10px] uppercase font-bold tracking-wider text-[#fff000] block">
-                      Sisa Waktu Hold
-                    </span>
-                    <span className="font-heading font-black text-2xl tracking-wider font-mono text-white">
-                      {formatTimer(remainingSeconds)}
-                    </span>
-                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Group WhatsApp Resmi */}
               {event.whatsappGroupLink && (
@@ -1459,7 +1827,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
               {/* Ringkasan */}
               <div className="bg-stone-50 rounded-2xl p-5 border border-stone-200">
                 <h3 className="font-heading font-bold text-sm text-[#141414] uppercase tracking-wider mb-3">
-                  Ringkasan Booking Vaksin
+                  {isNoVaccineSelected ? 'Ringkasan Pendaftaran' : 'Ringkasan Booking Vaksin'}
                 </h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                   <div>
@@ -1471,8 +1839,10 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                     <span className="font-bold text-[#141414]">{petName} ({petType === 'kucing' ? 'Kucing' : 'Anjing'})</span>
                   </div>
                   <div>
-                    <span className="text-stone-400 block">Vaksin:</span>
-                    <span className="font-bold text-[#141414]">{selectedVaccine?.name}</span>
+                    <span className="text-stone-400 block">Vaksin / Layanan:</span>
+                    <span className="font-bold text-[#141414]">
+                      {isNoVaccineSelected ? 'Tidak Memilih Vaksin (Keperluan Lainnya)' : selectedVaccine?.name}
+                    </span>
                   </div>
                   <div>
                     <span className="text-stone-400 block">Kloter:</span>
@@ -1480,10 +1850,23 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-stone-200 flex items-center justify-between">
+                {vaccineNotes.trim() && (
+                  <div className="mt-3 p-3 rounded-xl bg-yellow-50 border border-[#141414]/20 text-xs">
+                    <span className="text-stone-500 font-bold uppercase text-[10px] block mb-0.5">
+                      Keterangan / Kebutuhan Tambahan:
+                    </span>
+                    <p className="font-semibold text-[#141414] whitespace-pre-wrap">{vaccineNotes.trim()}</p>
+                  </div>
+                )}
+
+                <div className="mt-4 pt-3 border-t border-stone-200 flex items-center justify-between gap-2 flex-wrap">
                   <span className="font-bold text-sm text-[#141414]">Total Tagihan Booking:</span>
-                  <span className="font-heading font-black text-xl text-[#141414] bg-[#fff000] px-3 py-1 rounded-xl border border-[#141414]">
-                    {grandTotal === 0 ? 'GRATIS (Rp 0)' : `Rp ${grandTotal.toLocaleString('id-ID')}`}
+                  <span className="font-heading font-black text-base sm:text-xl text-[#141414] bg-[#fff000] px-3 py-1 rounded-xl border border-[#141414]">
+                    {grandTotal === 0
+                      ? (!isNoVaccineSelected && selectedVaccine?.priceText?.trim()
+                          ? selectedVaccine.priceText.trim()
+                          : 'GRATIS (Rp 0)')
+                      : `Rp ${grandTotal.toLocaleString('id-ID')}`}
                   </span>
                 </div>
               </div>
@@ -1550,104 +1933,116 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 </div>
               )}
 
-              {/* Upload Bukti Payment -> Auto-Verify + Instant Queue Number */}
-              <div className="bg-yellow-50/90 rounded-3xl p-5 border-2 border-[#141414] space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <label className="block text-xs font-extrabold text-[#141414] uppercase tracking-wider">
-                        Bukti Payment Booking Vaksin
-                      </label>
-                      <span className="bg-emerald-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                        Otomatis Terverifikasi & Dapat No. Antrian
-                      </span>
+              {/* Upload Bukti Payment (Hanya jika berbayar) */}
+              {grandTotal > 0 ? (
+                <div className="bg-yellow-50/90 rounded-3xl p-5 border-2 border-[#141414] space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <label className="block text-xs font-extrabold text-[#141414] uppercase tracking-wider">
+                          Bukti Payment Booking Vaksin
+                        </label>
+                        <span className="bg-emerald-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                          Otomatis Terverifikasi & Dapat No. Antrian
+                        </span>
+                      </div>
+                      <p className="text-xs text-stone-700 mt-0.5">
+                        Lampirkan foto bukti transfer atau link Drive untuk langsung mendapat <strong>Nomor Antrian (01, 02, ...)</strong> & Barcode Booth.
+                      </p>
                     </div>
-                    <p className="text-xs text-stone-700 mt-0.5">
-                      Lampirkan foto bukti transfer atau link Drive untuk langsung mendapat <strong>Nomor Antrian (01, 02, ...)</strong> & Barcode Booth.
-                    </p>
+
+                    <div className="inline-flex rounded-xl bg-white border border-stone-300 p-1 text-xs font-bold shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setProofType('upload')}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                          proofType === 'upload' ? 'bg-[#fff000] text-[#141414] font-extrabold' : 'text-stone-600'
+                        }`}
+                      >
+                        <ImageIcon className="w-3.5 h-3.5" />
+                        <span>Upload Foto</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProofType('link')}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                          proofType === 'link' ? 'bg-[#fff000] text-[#141414] font-extrabold' : 'text-stone-600'
+                        }`}
+                      >
+                        <LinkIcon className="w-3.5 h-3.5" />
+                        <span>Link Drive</span>
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="inline-flex rounded-xl bg-white border border-stone-300 p-1 text-xs font-bold shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setProofType('upload')}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                        proofType === 'upload' ? 'bg-[#fff000] text-[#141414] font-extrabold' : 'text-stone-600'
-                      }`}
-                    >
-                      <ImageIcon className="w-3.5 h-3.5" />
-                      <span>Upload Foto</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setProofType('link')}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                        proofType === 'link' ? 'bg-[#fff000] text-[#141414] font-extrabold' : 'text-stone-600'
-                      }`}
-                    >
-                      <LinkIcon className="w-3.5 h-3.5" />
-                      <span>Link Drive</span>
-                    </button>
-                  </div>
-                </div>
+                  {proofType === 'upload' && (
+                    <div className="space-y-3">
+                      <div className="flex flex-col sm:flex-row items-center gap-4">
+                        <label className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-[#141414] font-bold px-5 py-3 rounded-2xl border-2 border-[#141414] shadow-xs cursor-pointer text-sm transition-colors">
+                          <Upload className="w-4 h-4" />
+                          <span>Pilih Foto Bukti Transfer (JPG/PNG)</span>
+                          <input
+                            type="file"
+                            accept="image/*,application/pdf"
+                            onChange={(e) => handleFileChange(e, false)}
+                            className="hidden"
+                          />
+                        </label>
 
-                {proofType === 'upload' && (
-                  <div className="space-y-3">
-                    <div className="flex flex-col sm:flex-row items-center gap-4">
-                      <label className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-[#141414] font-bold px-5 py-3 rounded-2xl border-2 border-[#141414] shadow-xs cursor-pointer text-sm transition-colors">
-                        <Upload className="w-4 h-4" />
-                        <span>Pilih Foto Bukti Transfer (JPG/PNG)</span>
-                        <input
-                          type="file"
-                          accept="image/*,application/pdf"
-                          onChange={(e) => handleFileChange(e, false)}
-                          className="hidden"
-                        />
-                      </label>
+                        {paymentProofName ? (
+                          <div className="flex items-center gap-2 text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200">
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span className="truncate max-w-xs">{paymentProofName}</span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-stone-500">Belum ada file dipilih</span>
+                        )}
+                      </div>
 
-                      {paymentProofName ? (
-                        <div className="flex items-center gap-2 text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200">
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span className="truncate max-w-xs">{paymentProofName}</span>
+                      {paymentProofData && (
+                        <div>
+                          <img
+                            src={paymentProofData}
+                            alt="Bukti Transfer"
+                            className="max-h-40 rounded-2xl border border-stone-300 shadow-xs"
+                          />
                         </div>
-                      ) : (
-                        <span className="text-xs text-stone-500">Belum ada file dipilih</span>
                       )}
                     </div>
+                  )}
 
-                    {paymentProofData && (
-                      <div>
-                        <img
-                          src={paymentProofData}
-                          alt="Bukti Transfer"
-                          className="max-h-40 rounded-2xl border border-stone-300 shadow-xs"
-                        />
-                      </div>
-                    )}
+                  {proofType === 'link' && (
+                    <div className="relative">
+                      <input
+                        type="url"
+                        placeholder="Contoh: https://drive.google.com/open?id=..."
+                        value={paymentProofLink}
+                        onChange={(e) => setPaymentProofLink(e.target.value)}
+                        className="w-full pl-10 pr-4 py-3 rounded-2xl border border-stone-300 focus:border-[#141414] outline-hidden text-xs sm:text-sm bg-white"
+                      />
+                      <LinkIcon className="w-4 h-4 text-stone-400 absolute left-3.5 top-3.5" />
+                    </div>
+                  )}
+
+                  {/* 2-Hour Warning Notice */}
+                  <div className="bg-amber-100/80 border border-amber-400 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-amber-950">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Info Penting:</strong> Jika belum bisa mengunggah bukti bayar sekarang, Anda dapat menyimpan pendaftaran terlebih dahulu dengan batas waktu <strong>{event.paymentTimeoutHours || 2} jam</strong> untuk melunasi & mengunggah bukti agar mendapat Nomor Antrian. Jika lewat {event.paymentTimeoutHours || 2} jam tanpa bukti bayar, formulir otomatis <strong>HANGUS</strong>.
+                    </span>
                   </div>
-                )}
-
-                {proofType === 'link' && (
-                  <div className="relative">
-                    <input
-                      type="url"
-                      placeholder="Contoh: https://drive.google.com/open?id=..."
-                      value={paymentProofLink}
-                      onChange={(e) => setPaymentProofLink(e.target.value)}
-                      className="w-full pl-10 pr-4 py-3 rounded-2xl border border-stone-300 focus:border-[#141414] outline-hidden text-xs sm:text-sm bg-white"
-                    />
-                    <LinkIcon className="w-4 h-4 text-stone-400 absolute left-3.5 top-3.5" />
-                  </div>
-                )}
-
-                {/* 2-Hour Warning Notice */}
-                <div className="bg-amber-100/80 border border-amber-400 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-amber-950">
-                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <span>
-                    <strong>Info Penting:</strong> Jika belum bisa mengunggah bukti bayar sekarang, Anda dapat menyimpan pendaftaran terlebih dahulu dengan batas waktu <strong>{event.paymentTimeoutHours || 2} jam</strong> untuk melunasi & mengunggah bukti agar mendapat Nomor Antrian. Jika lewat {event.paymentTimeoutHours || 2} jam tanpa bukti bayar, formulir otomatis <strong>HANGUS</strong>.
-                  </span>
                 </div>
-              </div>
+              ) : (
+                <div className="bg-emerald-50/90 rounded-3xl p-5 border-2 border-emerald-400 flex items-start gap-3 text-xs sm:text-sm text-emerald-950">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block font-extrabold">Pendaftaran Tanpa Biaya Booking (GRATIS / Rp 0)</strong>
+                    <span>
+                      Tidak perlu melakukan transfer atau mengunggah bukti pembayaran. Klik tombol konfirmasi di bawah untuk langsung mendapatkan <strong>Nomor Antrian & Barcode Booth</strong>.
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {/* Actions */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-stone-100">
@@ -1656,7 +2051,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                   onClick={handleReleaseHoldAndBack}
                   className="w-full sm:w-auto px-4 py-3 rounded-2xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-sm font-semibold transition-colors"
                 >
-                  Batalkan & Lepaskan Kuota
+                  {holdId ? 'Batalkan & Lepaskan Kuota' : 'Kembali Ubah Pilihan'}
                 </button>
 
                 <div className="flex flex-col sm:flex-row items-center gap-2.5 w-full sm:w-auto">
@@ -1686,7 +2081,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                     ) : (
                       <>
                         <CheckCircle2 className="w-5 h-5" />
-                        <span>Konfirmasi Booking & Ambil No. Antrian</span>
+                        <span>{grandTotal === 0 ? 'Konfirmasi Pendaftaran & Ambil No. Antrian' : 'Konfirmasi Booking & Ambil No. Antrian'}</span>
                       </>
                     )}
                   </button>
@@ -1874,8 +2269,15 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
 
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-left bg-white p-4 rounded-2xl border border-stone-200">
                             <div>
-                              <span className="text-[11px] text-stone-400 uppercase font-bold block">Jenis Vaksin Dipilih</span>
+                              <span className="text-[11px] text-stone-400 uppercase font-bold block">Jenis Vaksin / Layanan Dipilih</span>
                               <strong className="text-sm text-[#141414]">{confirmedRegistration.vaccineName}</strong>
+                              <span className="block text-[11px] font-semibold text-stone-600 mt-0.5">
+                                Biaya: {confirmedRegistration.vaccinePriceText?.trim()
+                                  ? confirmedRegistration.vaccinePriceText.trim()
+                                  : confirmedRegistration.totalAmount === 0
+                                  ? 'GRATIS (Rp 0)'
+                                  : `Rp ${confirmedRegistration.totalAmount.toLocaleString('id-ID')}`}
+                              </span>
                             </div>
                             <div>
                               <span className="text-[11px] text-stone-400 uppercase font-bold block">Kloter Jam Pemeriksaan</span>
@@ -1894,6 +2296,16 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                                 {confirmedRegistration.petName} ({confirmedRegistration.petType === 'kucing' ? 'Kucing' : 'Anjing'})
                               </strong>
                             </div>
+                            <div className="sm:col-span-2 pt-2 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-500">
+                              <span>Event: <strong className="text-[#141414]">{confirmedRegistration.eventTitle}</strong></span>
+                              <span>Tercatat Permanen: <strong className="text-[#141414]">{new Date(confirmedRegistration.createdAt).toLocaleString('id-ID')}</strong></span>
+                            </div>
+                            {confirmedRegistration.vaccineNotes && (
+                              <div className="sm:col-span-2 pt-2 border-t border-stone-100">
+                                <span className="text-[11px] text-stone-400 uppercase font-bold block">Keterangan / Kebutuhan Tambahan</span>
+                                <strong className="text-xs sm:text-sm text-[#141414] whitespace-pre-wrap">{confirmedRegistration.vaccineNotes}</strong>
+                              </div>
+                            )}
                           </div>
 
                           {/* Editable Description Note beneath Queue Number */}
@@ -1972,7 +2384,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
 
                     <a
                       href={`https://wa.me/${event.contactWhatsApp.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(
-                        `Halo Panitia REMOV Pawrenting, saya telah terverifikasi booking:\nNo. Antrian: ${confirmedRegistration.queueNumber}\nNo. Reg: ${confirmedRegistration.regNumber}\nPawrent: ${confirmedRegistration.ownerName}\nAnabul: ${confirmedRegistration.petName}\nVaksin: ${confirmedRegistration.vaccineName}\nKloter: ${confirmedRegistration.selectedSession}`
+                        `Halo Panitia REMOV Pawrenting, saya telah terverifikasi booking:\nNo. Antrian: ${confirmedRegistration.queueNumber}\nNo. Reg: ${confirmedRegistration.regNumber}\nPawrent: ${confirmedRegistration.ownerName}\nAnabul: ${confirmedRegistration.petName}\nLayanan/Vaksin: ${confirmedRegistration.vaccineName}${confirmedRegistration.vaccineNotes ? `\nKeterangan: ${confirmedRegistration.vaccineNotes}` : ''}\nKloter: ${confirmedRegistration.selectedSession}`
                       )}`}
                       target="_blank"
                       rel="noreferrer"

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   LayoutDashboard, Users, Syringe, Settings, Table, Download,
   Plus, Edit2, Trash2, CheckCircle, XCircle, AlertCircle,
@@ -75,6 +75,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Modals: Vaccine & Bank
   const [isVaccineModalOpen, setIsVaccineModalOpen] = useState(false);
   const [editingVaccine, setEditingVaccine] = useState<Partial<VaccineOption> | null>(null);
+  const [confirmDeleteVaccineId, setConfirmDeleteVaccineId] = useState<string | null>(null);
+  const [deletingVaccineId, setDeletingVaccineId] = useState<string | null>(null);
+  const [vaccineFeedback, setVaccineFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [editingPriceVacId, setEditingPriceVacId] = useState<string | null>(null);
+  const [inlinePriceValue, setInlinePriceValue] = useState<string>('');
+  const [savingInlinePriceId, setSavingInlinePriceId] = useState<string | null>(null);
+  const [vaccinePriceMode, setVaccinePriceMode] = useState<'number' | 'text'>('number');
+  const [confirmEmptyAllQuotas, setConfirmEmptyAllQuotas] = useState(false);
+  const [isEmptyingQuotas, setIsEmptyingQuotas] = useState(false);
   const [isBankModalOpen, setIsBankModalOpen] = useState(false);
   const [editingBankAccount, setEditingBankAccount] = useState<Partial<BankAccount> | null>(null);
 
@@ -92,6 +101,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [eventSaveSuccess, setEventSaveSuccess] = useState(false);
   const [newChecklistText, setNewChecklistText] = useState('');
   const [newSessionText, setNewSessionText] = useState('');
+  const lastSyncedEventJsonRef = useRef<string>('');
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const notifyPublicSync = () => {
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('remov_event_sync');
+        bc.postMessage({ ts: Date.now() });
+        bc.close();
+      }
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
+    onRefreshParent();
+  };
 
   // Vouchers State
   const [redeemCodeInput, setRedeemCodeInput] = useState('');
@@ -156,12 +180,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const fetchAdminData = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/admin/data');
+      const res = await fetch(`/api/admin/data?_t=${Date.now()}`, { cache: 'no-store' });
       const data = await res.json();
       if (data.success) {
         setAdminData(data);
         setSheetWebhookUrl(data.sheetConfig.webhookUrl || '');
         setSheetAutoSync(data.sheetConfig.autoSync ?? true);
+        lastSyncedEventJsonRef.current = JSON.stringify(data.event);
         setEventForm(data.event);
         setArchiveResetForm(prev => ({
           ...prev,
@@ -181,6 +206,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     fetchAdminData();
     fetchFolders();
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
   }, []);
 
   // Upload asset into folder (/backgrounds, /logos, /vouchers, /archives)
@@ -289,11 +317,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
     const action = editingVaccine.id ? 'update' : 'create';
+    const cleanVaccine = { ...editingVaccine };
+    delete cleanVaccine.confirmedCount;
+    delete cleanVaccine.heldCount;
+    delete cleanVaccine.availableQuota;
+    delete cleanVaccine.isSoldOut;
     try {
       const res = await fetch('/api/admin/vaccines', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, vaccine: editingVaccine })
+        body: JSON.stringify({ action, vaccine: cleanVaccine })
       });
       if (res.ok) {
         setIsVaccineModalOpen(false);
@@ -317,25 +350,113 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleDeleteVaccine = async (vac: VaccineOption) => {
-    if (!confirm(`Hapus vaksin "${vac.name}"?`)) return;
+    setDeletingVaccineId(vac.id);
+    setVaccineFeedback(null);
+    try {
+      const res = await fetch('/api/admin/vaccines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', vaccine: { id: vac.id } })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || 'Gagal menghapus vaksin.');
+      }
+      setAdminData(prev => (prev ? { ...prev, vaccines: data.vaccines || [] } : prev));
+      setConfirmDeleteVaccineId(null);
+      setVaccineFeedback({ type: 'success', message: `Vaksin "${vac.name}" berhasil dihapus.` });
+      await fetchAdminData();
+      onRefreshParent();
+    } catch (err: any) {
+      setVaccineFeedback({ type: 'error', message: err?.message || 'Gagal menghapus vaksin.' });
+    } finally {
+      setDeletingVaccineId(null);
+    }
+  };
+
+  const handleAdjustQuota = async (vac: VaccineOption, delta: number) => {
+    const newQuota = Math.max(0, vac.totalQuota + delta);
+    const { confirmedCount: _c, heldCount: _h, availableQuota: _a, isSoldOut: _s, ...cleanVac } = vac;
     await fetch('/api/admin/vaccines', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delete', vaccine: { id: vac.id } })
+      body: JSON.stringify({ action: 'update', vaccine: { ...cleanVac, totalQuota: newQuota } })
     });
     fetchAdminData();
     onRefreshParent();
   };
 
-  const handleAdjustQuota = async (vac: VaccineOption, delta: number) => {
-    const newQuota = Math.max(1, vac.totalQuota + delta);
+  const handleSetQuotaZero = async (vac: VaccineOption) => {
+    const { confirmedCount: _c, heldCount: _h, availableQuota: _a, isSoldOut: _s, ...cleanVac } = vac;
     await fetch('/api/admin/vaccines', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'update', vaccine: { ...vac, totalQuota: newQuota } })
+      body: JSON.stringify({ action: 'update', vaccine: { ...cleanVac, totalQuota: 0 } })
     });
+    setVaccineFeedback({ type: 'success', message: `Kuota "${vac.name}" berhasil dikosongkan (0 / HABIS).` });
     fetchAdminData();
     onRefreshParent();
+  };
+
+  const handleEmptyAllQuotas = async () => {
+    setIsEmptyingQuotas(true);
+    setVaccineFeedback(null);
+    try {
+      const res = await fetch('/api/admin/vaccines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'empty-all-quotas' })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setConfirmEmptyAllQuotas(false);
+        setVaccineFeedback({ type: 'success', message: 'Seluruh kuota vaksin berhasil dikosongkan menjadi 0 (KUOTA HABIS).' });
+        await fetchAdminData();
+        onRefreshParent();
+      }
+    } finally {
+      setIsEmptyingQuotas(false);
+    }
+  };
+
+  const handleSaveInlinePrice = async (vac: VaccineOption) => {
+    const raw = inlinePriceValue.trim();
+    const isNumericInput = raw === '' || /^(?:rp\.?\s*)?[\d.,\s]+$/i.test(raw);
+    const digitsOnly = raw.replace(/[^\d]/g, '');
+
+    const nextPrice = isNumericInput ? (digitsOnly ? Number(digitsOnly) : 0) : 0;
+    const nextPriceText = isNumericInput ? '' : raw;
+
+    setSavingInlinePriceId(vac.id);
+    setVaccineFeedback(null);
+    const { confirmedCount: _c, heldCount: _h, availableQuota: _a, isSoldOut: _s, ...cleanVac } = vac;
+    try {
+      const res = await fetch('/api/admin/vaccines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update',
+          vaccine: { ...cleanVac, price: nextPrice, priceText: nextPriceText }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || 'Gagal memperbarui harga vaksin.');
+      }
+      setEditingPriceVacId(null);
+      setVaccineFeedback({
+        type: 'success',
+        message: `Harga "${vac.name}" diperbarui menjadi ${
+          nextPriceText ? nextPriceText : nextPrice === 0 ? 'GRATIS (Rp 0)' : `Rp ${nextPrice.toLocaleString('id-ID')}`
+        }.`
+      });
+      await fetchAdminData();
+      onRefreshParent();
+    } catch (err: any) {
+      setVaccineFeedback({ type: 'error', message: err?.message || 'Gagal memperbarui harga.' });
+    } finally {
+      setSavingInlinePriceId(null);
+    }
   };
 
   const handleSaveBankAccount = async (e: React.FormEvent) => {
@@ -607,52 +728,87 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const savePartialEventConfig = async (patch: Partial<EventConfig>) => {
-    setEventForm((prev) => {
-      const next = prev ? { ...prev, ...patch } : prev;
-      if (next) {
-        fetch('/api/admin/event', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(next)
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.success) {
-              setEventSaveSuccess(true);
-              fetchAdminData();
-              onRefreshParent();
-              setTimeout(() => setEventSaveSuccess(false), 2500);
-            }
-          })
-          .catch((err) => console.error('Error auto-saving event patch:', err));
-      }
-      return next;
-    });
-  };
-
-  const handleSaveEvent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!eventForm) return;
+  const flushEventFormToServer = async (targetForm: EventConfig, showBanner = true) => {
+    const { queueCounter: _q, publicShareUrl: _u, ...safePayload } = targetForm;
     setIsSavingEvent(true);
-    setEventSaveSuccess(false);
     try {
       const res = await fetch('/api/admin/event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(eventForm)
+        body: JSON.stringify(safePayload)
       });
-      if (res.ok) {
-        setEventSaveSuccess(true);
-        fetchAdminData();
-        onRefreshParent();
-        setTimeout(() => setEventSaveSuccess(false), 3000);
+      const data = await res.json();
+      if (res.ok && data.success && data.event) {
+        lastSyncedEventJsonRef.current = JSON.stringify(data.event);
+        setAdminData((prev) => (prev ? { ...prev, event: data.event } : prev));
+        if (showBanner) {
+          setEventSaveSuccess(true);
+          setTimeout(() => setEventSaveSuccess(false), 2500);
+        }
+        notifyPublicSync();
       }
     } catch (err) {
       console.error('Error saving event:', err);
     } finally {
       setIsSavingEvent(false);
     }
+  };
+
+  // Auto-save any edits made in Tab 7 after 650ms so the live app immediately reflects Admin updates
+  useEffect(() => {
+    if (!eventForm || !lastSyncedEventJsonRef.current) return;
+    if (JSON.stringify(eventForm) === lastSyncedEventJsonRef.current) return;
+    if (!eventForm.title || !eventForm.title.trim()) return;
+
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    const snapshot = eventForm;
+    autoSaveTimerRef.current = setTimeout(() => {
+      flushEventFormToServer(snapshot, true);
+    }, 650);
+
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    };
+  }, [eventForm]);
+
+  const savePartialEventConfig = async (patch: Partial<EventConfig>) => {
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    setEventForm((prev) => (prev ? { ...prev, ...patch } : prev));
+    try {
+      const res = await fetch('/api/admin/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch)
+      });
+      const data = await res.json();
+      if (data.success && data.event) {
+        lastSyncedEventJsonRef.current = JSON.stringify(data.event);
+        setEventSaveSuccess(true);
+        setAdminData((prev) => (prev ? { ...prev, event: data.event } : prev));
+        setEventForm(data.event);
+        notifyPublicSync();
+        setTimeout(() => setEventSaveSuccess(false), 2500);
+      }
+    } catch (err) {
+      console.error('Error auto-saving event patch:', err);
+    }
+  };
+
+  const handleSaveEvent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!eventForm) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    setEventSaveSuccess(false);
+    await flushEventFormToServer(eventForm, true);
+  };
+
+  const handleBackToPublicWithFlush = async () => {
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    if (eventForm && lastSyncedEventJsonRef.current && JSON.stringify(eventForm) !== lastSyncedEventJsonRef.current && eventForm.title.trim()) {
+      await flushEventFormToServer(eventForm, false);
+    }
+    notifyPublicSync();
+    onBackToPublic();
   };
 
   if (isLoading || !adminData) {
@@ -672,7 +828,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       r.ownerPhone.includes(searchTerm) ||
       r.regNumber.toLowerCase().includes(q) ||
       (r.queueNumber || '').toLowerCase().includes(q) ||
-      (r.barcodeCode || '').toLowerCase().includes(q);
+      (r.barcodeCode || '').toLowerCase().includes(q) ||
+      (r.vaccineNotes || '').toLowerCase().includes(q);
 
     const matchStatus = statusFilter === 'all' || r.paymentStatus === statusFilter;
     const matchCheckIn = checkInFilter === 'all' || (r.checkInStatus || 'belum_hadir') === checkInFilter;
@@ -755,8 +912,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           )}
 
           <button
-            onClick={onBackToPublic}
-            className="inline-flex items-center gap-1.5 bg-white hover:bg-stone-100 text-[#141414] text-xs font-bold px-3.5 py-2.5 rounded-xl transition-all"
+            onClick={handleBackToPublicWithFlush}
+            className="inline-flex items-center gap-1.5 bg-white hover:bg-stone-100 text-[#141414] text-xs font-bold px-3.5 py-2.5 rounded-xl transition-all cursor-pointer"
           >
             <span>Lihat Form Publik</span>
           </button>
@@ -895,6 +1052,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             <span className="text-[11px] text-stone-600 block truncate">
                               {reg.petType === 'kucing' ? '🐱' : '🐶'} {reg.petName} • {reg.vaccineName}
                             </span>
+                            {reg.vaccineNotes && (
+                              <span className="text-[10px] text-[#141414] bg-yellow-100 border border-yellow-300 px-1.5 py-0.5 rounded mt-0.5 inline-block max-w-full truncate">
+                                📝 {reg.vaccineNotes}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border shrink-0 ${badge.cls}`}>
@@ -1067,6 +1229,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {adminData.vaccines.map((v) => (
                   <option key={v.id} value={v.id}>{v.name}</option>
                 ))}
+                <option value="no-vaccine">Tidak Memilih Vaksin (Keperluan Lainnya)</option>
               </select>
             </div>
           </div>
@@ -1132,8 +1295,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <td className="py-3 px-3">
                           <strong className="text-[#141414] block">{reg.vaccineName}</strong>
                           <span className="text-[11px] text-stone-500 block">{reg.selectedSession}</span>
+                          {reg.vaccineNotes && (
+                            <span className="text-[11px] text-[#141414] bg-yellow-50 border border-yellow-300 px-2 py-0.5 rounded-md mt-1 inline-block max-w-[240px]">
+                              📝 {reg.vaccineNotes}
+                            </span>
+                          )}
                           {reg.rescheduledFromSession && (
-                            <span className="text-[10px] text-amber-700 font-semibold">
+                            <span className="text-[10px] text-amber-700 font-semibold block mt-0.5">
                               Digeser dari {reg.rescheduledFromSession}
                             </span>
                           )}
@@ -1574,19 +1742,67 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Tambah, hapus, atau nonaktifkan vaksin sesuai kebutuhan event.
               </p>
             </div>
-            <button
-              onClick={() => {
-                setEditingVaccine({
-                  name: '', code: '', category: 'kucing', totalQuota: 20, price: 100000, minAgeMonths: 2, description: '', active: true
-                });
-                setIsVaccineModalOpen(true);
-              }}
-              className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold text-xs px-4 py-2.5 rounded-xl"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Tambah Vaksin Baru</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {confirmEmptyAllQuotas ? (
+                <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-300 px-2.5 py-1.5 rounded-xl">
+                  <span className="text-[11px] font-bold text-rose-800">Habiskan semua kuota ke 0?</span>
+                  <button
+                    type="button"
+                    disabled={isEmptyingQuotas}
+                    onClick={handleEmptyAllQuotas}
+                    className="bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-extrabold px-2.5 py-1 rounded-lg cursor-pointer"
+                  >
+                    {isEmptyingQuotas ? 'Proses...' : 'Ya, Habiskan'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmEmptyAllQuotas(false)}
+                    className="bg-white border border-stone-300 text-stone-700 text-[11px] font-semibold px-2 py-1 rounded-lg cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmEmptyAllQuotas(true)}
+                  className="inline-flex items-center gap-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 font-bold text-xs px-3.5 py-2.5 rounded-xl cursor-pointer"
+                >
+                  <span>Kosongkan Semua Kuota (0)</span>
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  setVaccinePriceMode('number');
+                  setEditingVaccine({
+                    name: '', code: '', category: 'kucing', totalQuota: 20, price: 100000, priceText: '', minAgeMonths: 2, description: '', active: true
+                  });
+                  setIsVaccineModalOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold text-xs px-4 py-2.5 rounded-xl cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Tambah Vaksin Baru</span>
+              </button>
+            </div>
           </div>
+
+          {vaccineFeedback && (
+            <div className={`p-3 rounded-2xl text-xs font-semibold flex items-center justify-between gap-2 ${
+              vaccineFeedback.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border border-rose-200'
+            }`}>
+              <span>{vaccineFeedback.message}</span>
+              <button
+                type="button"
+                onClick={() => setVaccineFeedback(null)}
+                className="text-current opacity-70 hover:opacity-100 font-bold px-1.5"
+              >
+                ✕
+              </button>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {adminData.vaccines.map((vac) => (
@@ -1596,15 +1812,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   vac.active !== false ? 'border-stone-200 bg-white' : 'border-stone-200 bg-stone-100/70 opacity-70'
                 }`}
               >
-                <div className="flex items-start justify-between">
+                <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-xs font-bold text-[#141414] bg-[#fff000] border border-[#141414] px-2 py-0.5 rounded-md uppercase">
                         {vac.code}
                       </span>
                       <button
+                        type="button"
                         onClick={() => handleToggleVaccine(vac)}
-                        className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-md cursor-pointer ${
                           vac.active !== false ? 'bg-emerald-100 text-emerald-800' : 'bg-stone-300 text-stone-700'
                         }`}
                       >
@@ -1617,19 +1834,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <button
-                      onClick={() => { setEditingVaccine(vac); setIsVaccineModalOpen(true); }}
-                      className="p-2 bg-stone-100 hover:bg-[#fff000] text-stone-700 rounded-xl"
+                      type="button"
+                      onClick={() => {
+                        setConfirmDeleteVaccineId(null);
+                        setVaccinePriceMode(vac.priceText?.trim() ? 'text' : 'number');
+                        setEditingVaccine(vac);
+                        setIsVaccineModalOpen(true);
+                      }}
+                      title="Edit Vaksin"
+                      className="p-2 bg-stone-100 hover:bg-[#fff000] text-stone-700 rounded-xl cursor-pointer transition-colors"
                     >
                       <Edit2 className="w-4 h-4" />
                     </button>
-                    <button
-                      onClick={() => handleDeleteVaccine(vac)}
-                      className="p-2 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {confirmDeleteVaccineId === vac.id ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          disabled={deletingVaccineId === vac.id}
+                          onClick={() => handleDeleteVaccine(vac)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl text-[11px] font-bold cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>{deletingVaccineId === vac.id ? 'Menghapus...' : 'Hapus'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteVaccineId(null)}
+                          className="px-2 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-[11px] font-semibold cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteVaccineId(vac.id)}
+                        title="Hapus Vaksin"
+                        className="p-2 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl cursor-pointer transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1638,22 +1885,90 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <span className="text-stone-400 block text-[10px] uppercase font-bold">Total Kuota</span>
                     <strong className="text-[#141414] font-mono text-base">{vac.totalQuota}</strong>
                   </div>
-                  <div>
-                    <span className="text-stone-400 block text-[10px] uppercase font-bold">Harga</span>
-                    <strong className="text-[#141414] font-mono text-sm">Rp {vac.price.toLocaleString('id-ID')}</strong>
+                  <div
+                    onClick={() => {
+                      if (editingPriceVacId !== vac.id) {
+                        setEditingPriceVacId(vac.id);
+                        setInlinePriceValue(vac.priceText?.trim() ? vac.priceText.trim() : String(vac.price ?? 0));
+                      }
+                    }}
+                    title="Klik untuk ubah harga (angka atau keterangan tulisan)"
+                    className={`rounded-lg px-1.5 py-0.5 transition-colors ${
+                      editingPriceVacId === vac.id
+                        ? 'bg-white ring-2 ring-[#141414]'
+                        : 'cursor-pointer hover:bg-[#fff000]/40'
+                    }`}
+                  >
+                    <span className="text-stone-400 block text-[10px] uppercase font-bold">
+                      Harga <span className="text-[9px] text-stone-500 font-normal">✎</span>
+                    </span>
+                    {editingPriceVacId === vac.id ? (
+                      <div className="mt-1 space-y-1" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="text"
+                          autoFocus
+                          value={inlinePriceValue}
+                          onChange={(e) => setInlinePriceValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleSaveInlinePrice(vac);
+                            } else if (e.key === 'Escape') {
+                              setEditingPriceVacId(null);
+                            }
+                          }}
+                          placeholder="Angka / tulisan..."
+                          className="w-full px-1.5 py-1 text-[11px] font-semibold text-[#141414] bg-white border border-stone-300 rounded-md outline-hidden focus:border-[#141414]"
+                        />
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            type="button"
+                            disabled={savingInlinePriceId === vac.id}
+                            onClick={() => handleSaveInlinePrice(vac)}
+                            className="px-2 py-0.5 bg-[#141414] text-[#fff000] rounded text-[10px] font-bold cursor-pointer"
+                          >
+                            {savingInlinePriceId === vac.id ? '...' : 'Simpan'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingPriceVacId(null)}
+                            className="px-1.5 py-0.5 bg-stone-200 text-stone-700 rounded text-[10px] font-semibold cursor-pointer"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <strong className={`text-[#141414] block leading-tight mt-0.5 break-words ${vac.priceText?.trim() ? 'text-xs font-extrabold' : 'font-mono text-sm'}`}>
+                        {vac.priceText?.trim()
+                          ? vac.priceText.trim()
+                          : vac.price === 0
+                          ? 'GRATIS'
+                          : `Rp ${vac.price.toLocaleString('id-ID')}`}
+                      </strong>
+                    )}
                   </div>
                   <div>
                     <span className="text-stone-400 block text-[10px] uppercase font-bold">Sisa Kuota</span>
-                    <strong className="text-emerald-700 font-mono text-base">{vac.availableQuota ?? vac.totalQuota}</strong>
+                    <strong className={`font-mono text-base ${(vac.availableQuota ?? vac.totalQuota) <= 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
+                      {(vac.availableQuota ?? vac.totalQuota) <= 0 ? '0 (HABIS)' : (vac.availableQuota ?? vac.totalQuota)}
+                    </strong>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between pt-1">
+                <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
                   <span className="text-xs text-stone-500">Edit Cepat Kuota:</span>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => handleAdjustQuota(vac, -1)} className="w-7 h-7 bg-stone-100 hover:bg-stone-200 rounded-lg font-bold text-sm">-1</button>
-                    <button onClick={() => handleAdjustQuota(vac, 1)} className="w-7 h-7 bg-stone-100 hover:bg-stone-200 rounded-lg font-bold text-sm">+1</button>
-                    <button onClick={() => handleAdjustQuota(vac, 10)} className="px-2 py-1 bg-[#fff000] border border-[#141414] rounded-lg font-bold text-xs">+10</button>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => handleSetQuotaZero(vac)}
+                      className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg font-bold text-xs cursor-pointer"
+                    >
+                      Habiskan (0)
+                    </button>
+                    <button type="button" onClick={() => handleAdjustQuota(vac, -1)} className="w-7 h-7 bg-stone-100 hover:bg-stone-200 rounded-lg font-bold text-sm cursor-pointer">-1</button>
+                    <button type="button" onClick={() => handleAdjustQuota(vac, 1)} className="w-7 h-7 bg-stone-100 hover:bg-stone-200 rounded-lg font-bold text-sm cursor-pointer">+1</button>
+                    <button type="button" onClick={() => handleAdjustQuota(vac, 10)} className="px-2 py-1 bg-[#fff000] border border-[#141414] rounded-lg font-bold text-xs cursor-pointer">+10</button>
                   </div>
                 </div>
               </div>
@@ -2377,6 +2692,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div
+                onClick={() => savePartialEventConfig({ backgroundImageUrl: '' })}
+                className={`rounded-2xl overflow-hidden border-2 cursor-pointer transition-all flex flex-col ${
+                  eventForm.backgroundImageUrl === '' ? 'border-[#141414] ring-3 ring-[#fff000]' : 'border-stone-200 hover:border-stone-400'
+                }`}
+              >
+                <div className="h-24 w-full bg-[#fefdf5] flex items-center justify-center text-xs font-bold text-stone-400 border-b border-stone-200">
+                  Polos Bersih
+                </div>
+                <div className="p-2 bg-stone-50 flex items-center justify-between text-[11px]">
+                  <span className="truncate font-semibold text-stone-700">Tanpa Gambar</span>
+                  {eventForm.backgroundImageUrl === '' && <Check className="w-3.5 h-3.5 text-[#141414] shrink-0" />}
+                </div>
+              </div>
               {backgroundAssets.map((bg) => {
                 const isSelected = eventForm.backgroundImageUrl === bg.url;
                 return (
@@ -2915,13 +3244,72 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="font-bold block mb-1">Total Kuota</label>
-                  <input type="number" min={1} value={editingVaccine.totalQuota ?? 20} onChange={e => setEditingVaccine({ ...editingVaccine, totalQuota: Number(e.target.value) })} className="w-full px-3 py-2 rounded-xl border border-stone-300" />
+                  <label className="font-bold block mb-1">Total Kuota (isi 0 jika habis)</label>
+                  <input type="number" min={0} value={editingVaccine.totalQuota ?? 20} onChange={e => setEditingVaccine({ ...editingVaccine, totalQuota: Math.max(0, Number(e.target.value) || 0) })} className="w-full px-3 py-2 rounded-xl border border-stone-300" />
                 </div>
                 <div>
-                  <label className="font-bold block mb-1">Harga (Rp)</label>
-                  <input type="number" min={0} value={editingVaccine.price ?? 0} onChange={e => setEditingVaccine({ ...editingVaccine, price: Number(e.target.value) })} className="w-full px-3 py-2 rounded-xl border border-stone-300" />
+                  <label className="font-bold block mb-1">Min. Usia (Bulan)</label>
+                  <input type="number" min={0} value={editingVaccine.minAgeMonths ?? 2} onChange={e => setEditingVaccine({ ...editingVaccine, minAgeMonths: Number(e.target.value) })} className="w-full px-3 py-2 rounded-xl border border-stone-300" />
                 </div>
+              </div>
+              <div className="bg-stone-50 p-3 rounded-2xl border border-stone-200 space-y-2.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <label className="font-bold text-[#141414]">Format Tampilan Harga</label>
+                  <div className="inline-flex rounded-lg bg-white border border-stone-300 p-0.5 text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVaccinePriceMode('number');
+                        setEditingVaccine({ ...editingVaccine, priceText: '' });
+                      }}
+                      className={`px-2.5 py-1 rounded-md cursor-pointer ${vaccinePriceMode === 'number' ? 'bg-[#fff000] text-[#141414]' : 'text-stone-600'}`}
+                    >
+                      Angka (Rp)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVaccinePriceMode('text')}
+                      className={`px-2.5 py-1 rounded-md cursor-pointer ${vaccinePriceMode === 'text' ? 'bg-[#fff000] text-[#141414]' : 'text-stone-600'}`}
+                    >
+                      Keterangan Tulisan
+                    </button>
+                  </div>
+                </div>
+                {vaccinePriceMode === 'number' ? (
+                  <div>
+                    <label className="font-bold block mb-1 text-stone-600">Nominal Harga (Rp)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={editingVaccine.price ?? 0}
+                      onChange={e => setEditingVaccine({ ...editingVaccine, price: Number(e.target.value), priceText: '' })}
+                      className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white font-mono"
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div>
+                      <label className="font-bold block mb-1 text-stone-600">Keterangan Harga (Tulisan)</label>
+                      <input
+                        type="text"
+                        placeholder="Contoh: Sesuai Berat Badan / Bayar di Lokasi / Subsidi Khusus"
+                        value={editingVaccine.priceText || ''}
+                        onChange={e => setEditingVaccine({ ...editingVaccine, priceText: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="font-bold block mb-1 text-stone-500">Nominal Tagihan Transfer Online (Rp, isi 0 jika tanpa transfer)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={editingVaccine.price ?? 0}
+                        onChange={e => setEditingVaccine({ ...editingVaccine, price: Number(e.target.value) })}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
               <div>
                 <label className="font-bold block mb-1">Deskripsi</label>
@@ -3301,6 +3689,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div><span className="text-stone-400 block">Kloter:</span><strong>{selectedRegDetails.selectedSession}</strong></div>
               <div><span className="text-stone-400 block">Barcode:</span><strong className="font-mono">{selectedRegDetails.barcodeCode || '-'}</strong></div>
             </div>
+            {selectedRegDetails.vaccineNotes && (
+              <div className="bg-yellow-50 p-3 rounded-xl border border-yellow-300">
+                <span className="font-bold block text-[#141414] mb-0.5">Keterangan / Kebutuhan Tambahan Peserta:</span>
+                <p className="text-stone-800 whitespace-pre-wrap">{selectedRegDetails.vaccineNotes}</p>
+              </div>
+            )}
             {selectedRegDetails.healthChecklistAnswers && selectedRegDetails.healthChecklistAnswers.length > 0 && (
               <div className="bg-stone-50 p-3 rounded-xl border border-stone-200 space-y-1">
                 <span className="font-bold block text-stone-700">Checklist Kesehatan Peserta:</span>

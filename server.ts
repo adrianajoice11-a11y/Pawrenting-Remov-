@@ -22,6 +22,8 @@ const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.resolve(__dirname, 'data');
 const DB_PATH = path.resolve(DATA_DIR, 'db.json');
+const DB_BACKUP_PATH = path.resolve(DATA_DIR, 'db.backup.json');
+const DB_TMP_PATH = path.resolve(DATA_DIR, 'db.tmp.json');
 const PUBLIC_DIR = path.resolve(__dirname, 'public');
 
 const ASSET_FOLDERS = ['backgrounds', 'logos', 'vouchers', 'archives'] as const;
@@ -75,6 +77,7 @@ const defaultSpreadsheetColumns = [
   { key: 'petName', label: 'Nama Anabul yang akan divaksin', enabled: true },
   { key: 'petGender', label: 'Jenis Kelamin Anabul', enabled: true },
   { key: 'vaccineName', label: 'Pilih Vaksin', enabled: true },
+  { key: 'vaccineNotes', label: 'Keterangan Kebutuhan Tambahan', enabled: true },
   { key: 'selectedSession', label: 'Pemilihan kloter Pemeriksaan', enabled: true },
   { key: 'paymentProofUrl', label: 'Bukti Payment Booking', enabled: true },
   { key: 'paymentStatus', label: 'Status Booking', enabled: true },
@@ -334,115 +337,226 @@ const defaultInitialData: AppDatabase = {
   }
 };
 
+function sanitizeVaccinesForDisk(vaccines: VaccineOption[]): VaccineOption[] {
+  return vaccines.map((v) => {
+    const clean = { ...v };
+    delete clean.confirmedCount;
+    delete clean.heldCount;
+    delete clean.availableQuota;
+    delete clean.isSoldOut;
+    return {
+      ...clean,
+      active: clean.active !== false,
+    };
+  });
+}
+
+function sanitizeEventForDisk(event: EventConfig): EventConfig {
+  const clean = { ...event };
+  delete (clean as any).publicShareUrl;
+  return clean;
+}
+
+function parseDbPayload(parsed: any): AppDatabase {
+  const checklist = Array.isArray(parsed.event?.healthChecklistItems)
+    ? parsed.event.healthChecklistItems
+    : (parsed.event?.termsAndConditions && parsed.event.termsAndConditions.length > 0)
+      ? parsed.event.termsAndConditions.map((t: string, i: number) => ({ id: `chk-${i + 1}`, text: t, required: true }))
+      : defaultHealthChecklist;
+
+  const mergedEvent: EventConfig = {
+    ...defaultInitialData.event,
+    ...(parsed.event || {}),
+    whatsappGroupLink: parsed.event?.whatsappGroupLink !== undefined
+      ? parsed.event.whatsappGroupLink
+      : defaultInitialData.event.whatsappGroupLink,
+    whatsappGroupPrompt: parsed.event?.whatsappGroupPrompt !== undefined
+      ? parsed.event.whatsappGroupPrompt
+      : defaultInitialData.event.whatsappGroupPrompt,
+    adminPin: (parsed.event?.adminPin && String(parsed.event.adminPin).trim())
+      ? parsed.event.adminPin
+      : (defaultInitialData.event.adminPin || 'remov2026'),
+    removLogoUrl: parsed.event?.removLogoUrl !== undefined
+      ? parsed.event.removLogoUrl
+      : '/logos/remov-logo.svg',
+    partnerLogoUrl: parsed.event?.partnerLogoUrl ?? '',
+    partnerName: parsed.event?.partnerName ?? '',
+    heroBadgeText: parsed.event?.heroBadgeText ?? defaultInitialData.event.heroBadgeText,
+    dateCardLabel: parsed.event?.dateCardLabel ?? defaultInitialData.event.dateCardLabel,
+    dateNote: parsed.event?.dateNote ?? '',
+    showDateCard: parsed.event?.showDateCard !== false,
+    locationCardLabel: parsed.event?.locationCardLabel ?? defaultInitialData.event.locationCardLabel,
+    locationMapsUrl: parsed.event?.locationMapsUrl ?? '',
+    showLocationCard: parsed.event?.showLocationCard !== false,
+    backgroundImageUrl: parsed.event?.backgroundImageUrl !== undefined
+      ? parsed.event.backgroundImageUrl
+      : '/backgrounds/pawrenting-kuning-remov.svg',
+    backgroundOverlayOpacity: parsed.event?.backgroundOverlayOpacity ?? 78,
+    bookingSuccessLabel: parsed.event?.bookingSuccessLabel !== undefined
+      ? parsed.event.bookingSuccessLabel
+      : defaultInitialData.event.bookingSuccessLabel,
+    ticketArrivalNote: parsed.event?.ticketArrivalNote !== undefined
+      ? parsed.event.ticketArrivalNote
+      : defaultInitialData.event.ticketArrivalNote,
+    paymentTimeoutHours: parsed.event?.paymentTimeoutHours !== undefined
+      ? parsed.event.paymentTimeoutHours
+      : 2,
+    queueCounter: parsed.event?.queueCounter ?? 0,
+    sessions: Array.isArray(parsed.event?.sessions)
+      ? parsed.event.sessions
+      : defaultInitialData.event.sessions,
+    healthChecklistItems: checklist,
+    voucherTemplate: {
+      ...defaultInitialData.event.voucherTemplate,
+      ...(parsed.event?.voucherTemplate || {}),
+    },
+    spreadsheetConfig: {
+      ...defaultInitialData.event.spreadsheetConfig,
+      ...(parsed.event?.spreadsheetConfig || {}),
+      columns: (() => {
+        const existingCols = parsed.event?.spreadsheetConfig?.columns;
+        if (!existingCols || existingCols.length === 0) return defaultSpreadsheetColumns;
+        if (existingCols.some((c: any) => c.key === 'vaccineNotes')) return existingCols;
+        const nextCols = [...existingCols];
+        const vacIdx = nextCols.findIndex((c: any) => c.key === 'vaccineName');
+        const newCol = { key: 'vaccineNotes', label: 'Keterangan Kebutuhan Tambahan', enabled: true };
+        if (vacIdx >= 0) {
+          nextCols.splice(vacIdx + 1, 0, newCol);
+        } else {
+          nextCols.push(newCol);
+        }
+        return nextCols;
+      })(),
+    },
+    bankAccounts: Array.isArray(parsed.event?.bankAccounts)
+      ? parsed.event.bankAccounts.map((b: any, idx: number) => ({
+          id: b.id || `bank_${idx}_${Date.now()}`,
+          bankName: b.bankName || 'Bank',
+          accountNumber: b.accountNumber || '',
+          accountHolder: b.accountHolder || 'REMOV',
+          qrisUrl: b.qrisUrl || '',
+          notes: b.notes || '',
+          active: b.active !== false,
+        }))
+      : defaultInitialData.event.bankAccounts
+  };
+  delete (mergedEvent as any).publicShareUrl;
+
+  const rawRegs: Registration[] = Array.isArray(parsed.registrations)
+    ? parsed.registrations
+    : defaultInitialData.registrations;
+
+  // Ensure verified registrations have queueNumber & barcodeCode
+  let maxSeq = mergedEvent.queueCounter || 0;
+  const normalizedRegs = rawRegs.map((r) => {
+    if (r.paymentStatus === 'verified' && !r.queueNumber) {
+      maxSeq += 1;
+      const qStr = String(maxSeq).padStart(2, '0');
+      return {
+        ...r,
+        queueSequence: maxSeq,
+        queueNumber: qStr,
+        barcodeCode: r.barcodeCode || `REMOV-Q${qStr}-${new Date().getFullYear()}`,
+        checkInStatus: r.checkInStatus || 'belum_hadir',
+      };
+    }
+    if (r.queueSequence && r.queueSequence > maxSeq) {
+      maxSeq = r.queueSequence;
+    }
+    return {
+      ...r,
+      checkInStatus: r.checkInStatus || 'belum_hadir',
+    };
+  });
+  mergedEvent.queueCounter = maxSeq;
+
+  return {
+    ...defaultInitialData,
+    ...parsed,
+    event: mergedEvent,
+    vaccines: Array.isArray(parsed.vaccines)
+      ? sanitizeVaccinesForDisk(parsed.vaccines)
+      : defaultInitialData.vaccines,
+    registrations: normalizedRegs,
+    holds: Array.isArray(parsed.holds) ? parsed.holds : [],
+    vouchers: Array.isArray(parsed.vouchers) ? parsed.vouchers : [],
+    archives: Array.isArray(parsed.archives) ? parsed.archives : defaultInitialData.archives,
+    sheetConfig: { ...defaultInitialData.sheetConfig, ...(parsed.sheetConfig || {}) }
+  };
+}
+
 function readDb(): AppDatabase {
   try {
     if (!fs.existsSync(DB_PATH)) {
-      fs.writeFileSync(DB_PATH, JSON.stringify(defaultInitialData, null, 2), 'utf-8');
+      if (fs.existsSync(DB_BACKUP_PATH)) {
+        try {
+          const backupRaw = fs.readFileSync(DB_BACKUP_PATH, 'utf-8');
+          const restored = parseDbPayload(JSON.parse(backupRaw));
+          writeDb(restored);
+          return restored;
+        } catch (backupErr) {
+          console.error('Failed to restore from backup:', backupErr);
+        }
+      }
+      writeDb(defaultInitialData);
       return defaultInitialData;
     }
     const raw = fs.readFileSync(DB_PATH, 'utf-8');
     const parsed = JSON.parse(raw);
-
-    const checklist = (parsed.event?.healthChecklistItems && parsed.event.healthChecklistItems.length > 0)
-      ? parsed.event.healthChecklistItems
-      : (parsed.event?.termsAndConditions && parsed.event.termsAndConditions.length > 0)
-        ? parsed.event.termsAndConditions.map((t: string, i: number) => ({ id: `chk-${i + 1}`, text: t, required: true }))
-        : defaultHealthChecklist;
-
-    const mergedEvent: EventConfig = {
-      ...defaultInitialData.event,
-      ...(parsed.event || {}),
-      whatsappGroupLink: parsed.event?.whatsappGroupLink || defaultInitialData.event.whatsappGroupLink,
-      whatsappGroupPrompt: parsed.event?.whatsappGroupPrompt || defaultInitialData.event.whatsappGroupPrompt,
-      adminPin: parsed.event?.adminPin || defaultInitialData.event.adminPin || 'remov2026',
-      removLogoUrl: parsed.event?.removLogoUrl || '/logos/remov-logo.svg',
-      partnerLogoUrl: parsed.event?.partnerLogoUrl ?? '',
-      partnerName: parsed.event?.partnerName ?? '',
-      heroBadgeText: parsed.event?.heroBadgeText ?? defaultInitialData.event.heroBadgeText,
-      dateCardLabel: parsed.event?.dateCardLabel ?? defaultInitialData.event.dateCardLabel,
-      dateNote: parsed.event?.dateNote ?? '',
-      showDateCard: parsed.event?.showDateCard !== false,
-      locationCardLabel: parsed.event?.locationCardLabel ?? defaultInitialData.event.locationCardLabel,
-      locationMapsUrl: parsed.event?.locationMapsUrl ?? '',
-      showLocationCard: parsed.event?.showLocationCard !== false,
-      backgroundImageUrl: parsed.event?.backgroundImageUrl !== undefined ? parsed.event.backgroundImageUrl : '/backgrounds/pawrenting-kuning-remov.svg',
-      backgroundOverlayOpacity: parsed.event?.backgroundOverlayOpacity ?? 78,
-      bookingSuccessLabel: parsed.event?.bookingSuccessLabel || defaultInitialData.event.bookingSuccessLabel,
-      ticketArrivalNote: parsed.event?.ticketArrivalNote || defaultInitialData.event.ticketArrivalNote,
-      paymentTimeoutHours: parsed.event?.paymentTimeoutHours || 2,
-      queueCounter: parsed.event?.queueCounter ?? 0,
-      healthChecklistItems: checklist,
-      voucherTemplate: {
-        ...defaultInitialData.event.voucherTemplate,
-        ...(parsed.event?.voucherTemplate || {}),
-      },
-      spreadsheetConfig: {
-        ...defaultInitialData.event.spreadsheetConfig,
-        ...(parsed.event?.spreadsheetConfig || {}),
-        columns: (parsed.event?.spreadsheetConfig?.columns && parsed.event.spreadsheetConfig.columns.length > 0)
-          ? parsed.event.spreadsheetConfig.columns
-          : defaultSpreadsheetColumns,
-      },
-      bankAccounts: (parsed.event?.bankAccounts && parsed.event.bankAccounts.length > 0)
-        ? parsed.event.bankAccounts.map((b: any, idx: number) => ({
-            id: b.id || `bank_${idx}_${Date.now()}`,
-            bankName: b.bankName || 'Bank',
-            accountNumber: b.accountNumber || '',
-            accountHolder: b.accountHolder || 'REMOV',
-            qrisUrl: b.qrisUrl || '',
-            notes: b.notes || '',
-            active: b.active !== false,
-          }))
-        : defaultInitialData.event.bankAccounts
-    };
-
-    const rawRegs: Registration[] = parsed.registrations || defaultInitialData.registrations;
-    // Ensure verified registrations have queueNumber & barcodeCode
-    let maxSeq = mergedEvent.queueCounter || 0;
-    const normalizedRegs = rawRegs.map((r) => {
-      if (r.paymentStatus === 'verified' && !r.queueNumber) {
-        maxSeq += 1;
-        const qStr = String(maxSeq).padStart(2, '0');
-        return {
-          ...r,
-          queueSequence: maxSeq,
-          queueNumber: qStr,
-          barcodeCode: r.barcodeCode || `REMOV-Q${qStr}-${new Date().getFullYear()}`,
-          checkInStatus: r.checkInStatus || 'belum_hadir',
-        };
-      }
-      if (r.queueSequence && r.queueSequence > maxSeq) {
-        maxSeq = r.queueSequence;
-      }
-      return {
-        ...r,
-        checkInStatus: r.checkInStatus || 'belum_hadir',
-      };
-    });
-    mergedEvent.queueCounter = maxSeq;
-
-    return {
-      ...defaultInitialData,
-      ...parsed,
-      event: mergedEvent,
-      vaccines: (parsed.vaccines && parsed.vaccines.length > 0)
-        ? parsed.vaccines.map((v: any) => ({ ...v, active: v.active !== false }))
-        : defaultInitialData.vaccines,
-      registrations: normalizedRegs,
-      holds: parsed.holds || [],
-      vouchers: parsed.vouchers || [],
-      archives: Array.isArray(parsed.archives) ? parsed.archives : defaultInitialData.archives,
-      sheetConfig: { ...defaultInitialData.sheetConfig, ...(parsed.sheetConfig || {}) }
-    };
+    return parseDbPayload(parsed);
   } catch (err) {
-    console.error('Error reading DB, using default:', err);
+    console.error('Error reading DB, trying backup before fallback:', err);
+    if (fs.existsSync(DB_BACKUP_PATH)) {
+      try {
+        const backupRaw = fs.readFileSync(DB_BACKUP_PATH, 'utf-8');
+        const restored = parseDbPayload(JSON.parse(backupRaw));
+        return restored;
+      } catch (backupErr) {
+        console.error('Backup DB also unreadable:', backupErr);
+      }
+    }
     return defaultInitialData;
+  }
+}
+
+const sseClients = new Set<express.Response>();
+
+function broadcastDbUpdate(reason = 'db_updated') {
+  const payload = `data: ${JSON.stringify({ type: 'update', reason, ts: Date.now() })}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
   }
 }
 
 function writeDb(data: AppDatabase) {
   try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf-8');
+    const cleanData: AppDatabase = {
+      ...data,
+      event: sanitizeEventForDisk(data.event),
+      vaccines: sanitizeVaccinesForDisk(data.vaccines),
+    };
+    const serialized = JSON.stringify(cleanData, null, 2);
+    if (!serialized || serialized.length < 10) return;
+
+    if (fs.existsSync(DB_PATH)) {
+      try {
+        const existingRaw = fs.readFileSync(DB_PATH, 'utf-8');
+        if (existingRaw && existingRaw.trim().startsWith('{')) {
+          JSON.parse(existingRaw);
+          fs.writeFileSync(DB_BACKUP_PATH, existingRaw, 'utf-8');
+        }
+      } catch {
+        // Skip overwriting backup if current main file is corrupt
+      }
+    }
+
+    fs.writeFileSync(DB_TMP_PATH, serialized, 'utf-8');
+    fs.renameSync(DB_TMP_PATH, DB_PATH);
+    broadcastDbUpdate('db_saved');
   } catch (err) {
     console.error('Error writing DB:', err);
   }
@@ -665,6 +779,32 @@ async function startServer() {
     }
   });
 
+  // 0. REAL-TIME SYNC STREAM (SSE): Push instant updates when Admin changes form/event/quota
+  app.get('/api/events/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    sseClients.add(res);
+    res.write(`data: ${JSON.stringify({ type: 'connected', ts: Date.now() })}\n\n`);
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: heartbeat ${Date.now()}\n\n`);
+      } catch {
+        clearInterval(heartbeat);
+        sseClients.delete(res);
+      }
+    }, 25000);
+
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    });
+  });
+
   // 1. PUBLIC: GET Event & Active Vaccines with Real-time Quota
   app.get('/api/event', (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -701,7 +841,7 @@ async function startServer() {
     const { pin } = req.body;
     const db = readDb();
     const validPin = (db.event.adminPin || 'remov2026').trim();
-    if (pin && (pin.trim() === validPin || pin.trim() === 'remov2026' || pin.trim() === 'admin123')) {
+    if (pin && pin.trim() === validPin) {
       return res.json({ success: true, message: 'Autentikasi admin berhasil' });
     }
     return res.status(401).json({ success: false, message: 'PIN Admin tidak sesuai. Silakan coba kembali.' });
@@ -792,15 +932,33 @@ async function startServer() {
     try {
       const regData = req.body;
       const { holdId, vaccineId } = regData;
+      const vaccineNotes = regData.vaccineNotes ? String(regData.vaccineNotes).trim() : '';
+      const isNoVaccine = vaccineId === 'no-vaccine' || vaccineId === 'none';
 
       if (!vaccineId || !regData.ownerName || !regData.ownerPhone || !regData.petName) {
         return res.status(400).json({ success: false, message: 'Lengkapi seluruh data wajib pendaftaran.' });
       }
 
+      if (isNoVaccine && !vaccineNotes) {
+        return res.status(400).json({
+          success: false,
+          message: 'Mohon isi kolom keterangan kebutuhan Anda karena Anda memilih tidak mengambil vaksin.'
+        });
+      }
+
       const db = readDb();
       cleanExpiredHoldsAndBookings(db);
 
-      const vaccine = db.vaccines.find(v => v.id === vaccineId);
+      const vaccine = isNoVaccine
+        ? {
+            id: 'no-vaccine',
+            name: 'Tidak Memilih Vaksin (Keperluan Lainnya)',
+            code: 'LAIN',
+            price: 0,
+            totalQuota: 999999,
+          }
+        : db.vaccines.find(v => v.id === vaccineId);
+
       if (!vaccine) {
         return res.status(404).json({ success: false, message: 'Jenis vaksin tidak ditemukan.' });
       }
@@ -809,7 +967,7 @@ async function startServer() {
 
       if (existingHoldIndex >= 0) {
         db.holds.splice(existingHoldIndex, 1);
-      } else {
+      } else if (!isNoVaccine) {
         const confirmedCount = db.registrations.filter(
           r => r.vaccineId === vaccine.id && r.paymentStatus !== 'rejected' && r.paymentStatus !== 'expired'
         ).length;
@@ -869,10 +1027,12 @@ async function startServer() {
         vaccineId: vaccine.id,
         vaccineName: vaccine.name,
         vaccinePrice: vaccine.price,
+        vaccinePriceText: (vaccine as VaccineOption).priceText || '',
+        vaccineNotes,
         selectedSession: regData.selectedSession || db.event.sessions[0] || 'Sesi Utama',
         addOns: [],
         totalAmount: vaccine.price,
-        paymentMethod: regData.paymentMethod || 'QRIS REMOV Official',
+        paymentMethod: regData.paymentMethod || (vaccine.price === 0 ? 'Tanpa Biaya' : 'QRIS REMOV Official'),
         paymentBankTarget: regData.paymentBankTarget || '',
         paymentProofUrl: proofUrl,
         paymentProofType: proofType,
@@ -887,13 +1047,16 @@ async function startServer() {
         syncedToGoogleSheet: false,
       };
 
-      // Assign Queue Number immediately if payment proof is provided (or vaccine is free price=0)
+      // Assign Queue Number immediately if payment proof is provided (or vaccine is free price=0 / non-vaccine)
       if (hasProof || vaccine.price === 0) {
         newRegistration.paymentStatus = 'verified';
         newRegistration.verifiedAt = nowIso;
-        newRegistration.paymentNotes = vaccine.price === 0 && !hasProof
-          ? 'Pendaftaran layanan gratis otomatis terverifikasi'
-          : 'Otomatis terverifikasi booking saat bukti payment booking dilampirkan';
+        newRegistration.paymentDeadlineAt = undefined;
+        newRegistration.paymentNotes = isNoVaccine
+          ? 'Pendaftaran non-vaksin (keperluan lainnya) otomatis terverifikasi'
+          : (vaccine.price === 0 && !hasProof
+              ? 'Pendaftaran layanan gratis otomatis terverifikasi'
+              : 'Otomatis terverifikasi booking saat bukti payment booking dilampirkan');
         assignQueueNumberIfMissing(db, newRegistration);
       }
 
@@ -997,6 +1160,10 @@ async function startServer() {
 
   // 5. ADMIN / PANITIA: Check Registration Status / Barcode / Queue Lookup
   app.get('/api/registrations/:idOrNumber', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const rawQuery = decodeURIComponent(req.params.idOrNumber).trim();
     const db = readDb();
     if (cleanExpiredHoldsAndBookings(db)) {
@@ -1092,6 +1259,10 @@ async function startServer() {
 
   // 6. ADMIN: Full Data (GET /api/admin/data)
   app.get('/api/admin/data', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const db = readDb();
     if (cleanExpiredHoldsAndBookings(db)) {
       writeDb(db);
@@ -1140,57 +1311,95 @@ async function startServer() {
   // 7. ADMIN: Update Event Info, Logos, Background, Checklist, & Ticket Copy (POST /api/admin/event)
   app.post('/api/admin/event', (req, res) => {
     const db = readDb();
-    const updatedChecklist = req.body.healthChecklistItems || db.event.healthChecklistItems;
+    const incoming = { ...(req.body || {}) };
+    delete incoming.publicShareUrl;
+    delete incoming.queueCounter;
+
+    const updatedChecklist = Array.isArray(incoming.healthChecklistItems)
+      ? incoming.healthChecklistItems
+      : db.event.healthChecklistItems;
+
+    const nextAdminPin =
+      incoming.adminPin !== undefined && String(incoming.adminPin).trim() !== ''
+        ? String(incoming.adminPin).trim()
+        : db.event.adminPin;
+
     db.event = {
       ...db.event,
-      ...req.body,
+      ...incoming,
+      adminPin: nextAdminPin,
+      queueCounter: db.event.queueCounter,
       healthChecklistItems: updatedChecklist,
       termsAndConditions: Array.isArray(updatedChecklist)
         ? updatedChecklist.map((c: HealthChecklistItem) => c.text)
         : db.event.termsAndConditions,
     };
     writeDb(db);
-    res.json({ success: true, event: db.event, message: 'Pengaturan event berhasil diperbarui.' });
+    res.json({
+      success: true,
+      event: {
+        ...db.event,
+        publicShareUrl: resolvePublicShareUrl(db, req),
+      },
+      message: 'Pengaturan event berhasil diperbarui.'
+    });
   });
 
   // 8. ADMIN: Manage Vaccines (POST /api/admin/vaccines)
   app.post('/api/admin/vaccines', (req, res) => {
     const { action, vaccine } = req.body;
     const db = readDb();
+    const cleanIncoming = vaccine ? { ...vaccine } : {};
+    delete cleanIncoming.confirmedCount;
+    delete cleanIncoming.heldCount;
+    delete cleanIncoming.availableQuota;
+    delete cleanIncoming.isSoldOut;
 
     if (action === 'create') {
+      const parsedQuota = cleanIncoming.totalQuota !== undefined && cleanIncoming.totalQuota !== ''
+        ? Math.max(0, Number(cleanIncoming.totalQuota) || 0)
+        : 20;
       const newVac: VaccineOption = {
         id: 'vac_' + Date.now(),
-        name: vaccine.name,
-        code: (vaccine.code || vaccine.name.substring(0, 4)).toUpperCase(),
-        category: vaccine.category || 'semua',
-        totalQuota: Number(vaccine.totalQuota) || 20,
-        price: Number(vaccine.price) || 0,
-        description: vaccine.description || '',
-        minAgeMonths: Number(vaccine.minAgeMonths) || 2,
-        active: vaccine.active !== false,
-        notes: vaccine.notes || ''
+        name: cleanIncoming.name,
+        code: (cleanIncoming.code || cleanIncoming.name.substring(0, 4)).toUpperCase(),
+        category: cleanIncoming.category || 'semua',
+        totalQuota: parsedQuota,
+        price: Math.max(0, Number(cleanIncoming.price) || 0),
+        priceText: cleanIncoming.priceText ? String(cleanIncoming.priceText).trim() : '',
+        description: cleanIncoming.description || '',
+        minAgeMonths: Number(cleanIncoming.minAgeMonths) || 2,
+        active: cleanIncoming.active !== false,
+        notes: cleanIncoming.notes || ''
       };
       db.vaccines.push(newVac);
     } else if (action === 'update') {
-      const idx = db.vaccines.findIndex(v => v.id === vaccine.id);
+      const idx = db.vaccines.findIndex(v => v.id === cleanIncoming.id);
       if (idx >= 0) {
         db.vaccines[idx] = {
           ...db.vaccines[idx],
-          ...vaccine,
-          totalQuota: Number(vaccine.totalQuota),
-          price: Number(vaccine.price),
-          minAgeMonths: Number(vaccine.minAgeMonths),
-          active: vaccine.active !== undefined ? !!vaccine.active : db.vaccines[idx].active,
+          ...cleanIncoming,
+          totalQuota: Math.max(0, Number(cleanIncoming.totalQuota) || 0),
+          price: Math.max(0, Number(cleanIncoming.price) || 0),
+          priceText: cleanIncoming.priceText !== undefined
+            ? String(cleanIncoming.priceText).trim()
+            : (db.vaccines[idx].priceText || ''),
+          minAgeMonths: Number(cleanIncoming.minAgeMonths),
+          active: cleanIncoming.active !== undefined ? !!cleanIncoming.active : db.vaccines[idx].active,
         };
       }
+    } else if (action === 'empty-all-quotas') {
+      db.vaccines = db.vaccines.map(v => ({ ...v, totalQuota: 0 }));
+      db.holds = [];
     } else if (action === 'toggle') {
-      const idx = db.vaccines.findIndex(v => v.id === vaccine.id);
+      const idx = db.vaccines.findIndex(v => v.id === cleanIncoming.id);
       if (idx >= 0) {
         db.vaccines[idx].active = !db.vaccines[idx].active;
       }
     } else if (action === 'delete') {
-      db.vaccines = db.vaccines.filter(v => v.id !== vaccine.id);
+      const targetId = String(cleanIncoming?.id || '');
+      db.vaccines = db.vaccines.filter(v => String(v.id) !== targetId);
+      db.holds = db.holds.filter(h => String(h.vaccineId) !== targetId);
     }
 
     writeDb(db);

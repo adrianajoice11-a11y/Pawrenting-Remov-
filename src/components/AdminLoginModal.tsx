@@ -43,24 +43,10 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
         onClose();
         setPin('');
       } else {
-        if (pin.trim() === 'remov2026' || pin.trim() === 'admin123') {
-          sessionStorage.setItem('remov_admin_auth', 'true');
-          onSuccess();
-          onClose();
-          setPin('');
-        } else {
-          setErrorMessage(data.message || 'PIN Admin salah. Silakan coba kembali.');
-        }
+        setErrorMessage(data.message || 'PIN Admin salah. Silakan coba kembali.');
       }
     } catch {
-      if (pin.trim() === 'remov2026' || pin.trim() === 'admin123') {
-        sessionStorage.setItem('remov_admin_auth', 'true');
-        onSuccess();
-        onClose();
-        setPin('');
-      } else {
-        setErrorMessage('PIN Admin tidak sesuai. Hubungi koordinator panitia.');
-      }
+      setErrorMessage('Gagal terhubung ke server untuk verifikasi PIN. Silakan coba lagi.');
     } finally {
       setIsLoading(false);
     }
@@ -116,7 +102,8 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 type={showPin ? 'text' : 'password'}
                 required
                 autoFocus
-                placeholder="Masukkan PIN Admin..."
+                autoComplete="current-password"
+                placeholder="Masukkan PIN / Kata Sandi Panitia..."
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
                 className="w-full pl-10 pr-11 py-3 rounded-2xl border border-stone-300 focus:border-[#141414] focus:ring-3 focus:ring-[#fff000]/50 outline-hidden text-sm font-mono tracking-wider"
@@ -131,9 +118,8 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
                 {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
-            <p className="text-[11px] text-stone-400 mt-1.5 flex items-center justify-between">
-              <span>PIN Standar Bawaan: <code className="bg-stone-100 px-1.5 py-0.5 rounded text-[#141414] font-bold">remov2026</code></span>
-              <span className="text-stone-400">(Dapat diubah di dashboard)</span>
+            <p className="text-[11px] text-stone-400 mt-1.5">
+              Kata sandi hanya diketahui panitia resmi dan dapat diubah melalui Dashboard Admin.
             </p>
           </div>
 

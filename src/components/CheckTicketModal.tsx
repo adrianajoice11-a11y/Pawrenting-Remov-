@@ -250,6 +250,12 @@ export const CheckTicketModal: React.FC<CheckTicketProps> = ({ event, onBackToFo
                     </span>
                   )}
                 </div>
+                {result.vaccineNotes && (
+                  <div className="col-span-2 bg-white/90 p-2.5 rounded-xl border border-stone-200">
+                    <span className="text-stone-500 block text-[11px]">Keterangan / Kebutuhan Tambahan:</span>
+                    <strong className="text-[#141414] text-xs whitespace-pre-wrap">{result.vaccineNotes}</strong>
+                  </div>
+                )}
               </div>
 
               {qrCodeUrl && (
