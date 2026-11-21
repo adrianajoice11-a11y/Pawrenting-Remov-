@@ -89,6 +89,13 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
 
   // Completed Registration & Late Proof Upload
   const [confirmedRegistration, setConfirmedRegistration] = useState<Registration | null>(null);
+  const [confirmedArchiveInfo, setConfirmedArchiveInfo] = useState<{
+    eventTitle: string;
+    eventDate: string;
+    timeRange?: string;
+    locationName: string;
+    completionStatement?: string;
+  } | null>(null);
   const [ticketQrUrl, setTicketQrUrl] = useState<string>('');
   const [copiedBank, setCopiedBank] = useState<string | null>(null);
   const [lateProofType, setLateProofType] = useState<'upload' | 'link'>('upload');
@@ -171,6 +178,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       }
       persistRegistrationRef(data.registration);
       setConfirmedRegistration(data.registration);
+      setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
       setCurrentStep(5);
     } catch {
       setSavedRegError('Gagal memuat data pendaftaran tersimpan. Silakan coba lagi.');
@@ -257,7 +265,58 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         .then(url => setTicketQrUrl(url))
         .catch(err => console.error('QR code error:', err));
     }
-  }, [confirmedRegistration?.id, confirmedRegistration?.paymentStatus, confirmedRegistration?.queueNumber, event.date]);
+  }, [confirmedRegistration?.id, confirmedRegistration?.paymentStatus, confirmedRegistration?.queueNumber, confirmedRegistration?.selectedSession, event.date]);
+
+  // Real-time auto-sync for the customer's active ticket (check-in, kloter reschedule, payment status, event completion)
+  useEffect(() => {
+    if (!confirmedRegistration?.id) return;
+    const regId = confirmedRegistration.id;
+
+    const refreshTicket = async () => {
+      try {
+        const res = await fetch(`/api/registrations/${encodeURIComponent(regId)}?_t=${Date.now()}`, {
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success && data.registration) {
+          setConfirmedRegistration(data.registration);
+          setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
+          persistRegistrationRef(data.registration);
+        }
+      } catch {
+        // Ignore transient network errors
+      }
+    };
+
+    let evtSource: EventSource | null = null;
+    if (typeof EventSource !== 'undefined') {
+      evtSource = new EventSource('/api/events/stream');
+      evtSource.onmessage = (msg) => {
+        try {
+          const parsed = JSON.parse(msg.data);
+          if (parsed?.type === 'update') {
+            refreshTicket();
+          }
+        } catch {
+          // Ignore heartbeat
+        }
+      };
+    }
+
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      bc = new BroadcastChannel('remov_event_sync');
+      bc.onmessage = () => refreshTicket();
+    }
+
+    const timer = setInterval(refreshTicket, 6000);
+    return () => {
+      clearInterval(timer);
+      evtSource?.close();
+      bc?.close();
+    };
+  }, [confirmedRegistration?.id, event.eventStatus, event.eventCompletedAt]);
 
   const isNoVaccineSelected = selectedVaccineId === NO_VACCINE_ID;
   const selectedVaccine = availableVaccines.find(v => v.id === selectedVaccineId);
@@ -454,6 +513,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       }
 
       setConfirmedRegistration(data.registration);
+      setConfirmedArchiveInfo(null);
       persistRegistrationRef(data.registration);
       setHoldId(null);
       setHoldExpiresAt(null);
@@ -518,6 +578,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         return;
       }
       setConfirmedRegistration(data.registration);
+      setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
       persistRegistrationRef(data.registration);
       setCurrentStep(5);
       setShowResumeBox(false);
@@ -742,7 +803,6 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
             <div className="mt-4 pt-3 border-t border-[#141414]/15 flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-[#141414]">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                 <span>🩺 Tim Dokter Hewan Berizin</span>
-                <span>🔒 Slot Kuota Terkunci {event.holdDurationMinutes || 10} Menit saat Bayar</span>
                 <span>🎟️ Nomor Antrian & Barcode Otomatis</span>
               </div>
 
@@ -866,7 +926,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         )}
 
         {/* Step Progress Indicator */}
-        {currentStep < 5 && (
+        {currentStep < 5 && event.eventStatus !== 'completed' && (
           <div className="mb-6 sm:mb-8 bg-white/90 backdrop-blur-sm rounded-2xl sm:rounded-3xl p-3 sm:p-5 border border-stone-200 shadow-xs">
             <div className="flex items-center justify-between gap-1">
               {[
@@ -914,7 +974,48 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         {/* Main Form Card Container */}
         <div className="bg-white rounded-2xl sm:rounded-3xl p-4 sm:p-8 border-2 border-[#141414]/15 shadow-xl">
 
-          {submitError && currentStep < 5 && (
+          {/* Official Event Completed Statement Banner (when Admin finishes event) */}
+          {currentStep < 5 && event.eventStatus === 'completed' && (
+            <div className="space-y-5 py-4 text-center">
+              <div className="w-16 h-16 bg-emerald-100 border-2 border-emerald-500 text-emerald-700 rounded-full flex items-center justify-center mx-auto">
+                <CheckCircle2 className="w-9 h-9" />
+              </div>
+              <div className="space-y-2 max-w-2xl mx-auto">
+                <span className="inline-block bg-emerald-600 text-white text-[11px] font-black uppercase tracking-wider px-3 py-1 rounded-full">
+                  Pernyataan Resmi Tim Admin • Event Selesai
+                </span>
+                <h2 className="font-heading font-black text-xl sm:text-2xl text-[#141414]">
+                  {event.title}{event.partnerName ? ` × ${event.partnerName}` : ''} Telah Selesai Dilaksanakan
+                </h2>
+                <div className="bg-emerald-50 border-2 border-emerald-300 rounded-2xl p-4 sm:p-5 text-left space-y-2 text-xs sm:text-sm text-emerald-950">
+                  <p className="font-semibold leading-relaxed">
+                    {event.eventCompletedStatement || `Tim Admin REMOV menyatakan bahwa acara ini telah selesai dilaksanakan. Seluruh data peserta telah tersimpan otomatis sesuai jadwal event.`}
+                  </p>
+                  <div className="pt-2 border-t border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-[11px] text-emerald-800">
+                    <span>
+                      Jadwal Tersimpan: <strong>{event.date}</strong> ({event.timeRange}) • <strong>{event.locationName}</strong>
+                    </span>
+                    {event.eventCompletedBy && (
+                      <span>Oleh: <strong>{event.eventCompletedBy}</strong></span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowResumeBox(true)}
+                  className="inline-flex items-center gap-2 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold px-5 py-3 rounded-2xl text-xs sm:text-sm cursor-pointer"
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>Cek Tiket / Data Pendaftaran Saya</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {submitError && currentStep < 5 && event.eventStatus !== 'completed' && (
             <div className="mb-6 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl p-4 flex items-start gap-3 text-sm">
               <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               <span>{submitError}</span>
@@ -2196,10 +2297,38 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                               <CheckCircle2 className="w-3.5 h-3.5" />
                               {event.bookingSuccessLabel || 'SUKSES BOOKING'}
                             </span>
+                            <span className={`inline-flex items-center gap-1 text-xs font-extrabold px-3 py-1.5 rounded-full border ${
+                              confirmedRegistration.checkInStatus === 'sudah_hadir'
+                                ? 'bg-emerald-100 text-emerald-800 border-emerald-400'
+                                : confirmedRegistration.checkInStatus === 'selesai_vaksin'
+                                ? 'bg-sky-100 text-sky-800 border-sky-400'
+                                : confirmedRegistration.checkInStatus === 'tidak_hadir'
+                                ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                : 'bg-stone-100 text-stone-700 border-stone-300'
+                            }`}>
+                              {confirmedRegistration.checkInStatus === 'sudah_hadir'
+                                ? '✓ Sudah Hadir di Booth'
+                                : confirmedRegistration.checkInStatus === 'selesai_vaksin'
+                                ? '✓ Selesai Vaksinasi'
+                                : confirmedRegistration.checkInStatus === 'tidak_hadir'
+                                ? 'Tidak Hadir'
+                                : 'Belum Check-In Booth'}
+                            </span>
                             <span className="font-mono text-xs font-bold bg-white border border-stone-300 text-[#141414] px-3 py-1.5 rounded-full">
                               {confirmedRegistration.regNumber}
                             </span>
                           </div>
+
+                          {(event.eventStatus === 'completed' || confirmedArchiveInfo) && (
+                            <div className="bg-emerald-50 border border-emerald-300 rounded-2xl p-3 text-left text-xs text-emerald-950">
+                              <strong className="block font-extrabold">
+                                ✓ Event Telah Selesai &amp; Data Tersimpan Sesuai Jadwal
+                              </strong>
+                              <span className="block text-emerald-900 mt-0.5">
+                                {confirmedArchiveInfo?.completionStatement || event.eventCompletedStatement || 'Tim Admin telah menyatakan event selesai dan data Anda tersimpan rapi sesuai jadwal pelaksanaan.'}
+                              </span>
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-left bg-white p-4 rounded-2xl border border-stone-200">
                             <div>
@@ -2231,9 +2360,19 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                               </strong>
                             </div>
                             <div className="sm:col-span-2 pt-2 border-t border-stone-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-500">
-                              <span>Event: <strong className="text-[#141414]">{confirmedRegistration.eventTitle}</strong></span>
-                              <span>Tercatat Permanen: <strong className="text-[#141414]">{new Date(confirmedRegistration.createdAt).toLocaleString('id-ID')}</strong></span>
+                              <span>
+                                Event: <strong className="text-[#141414]">{confirmedArchiveInfo?.eventTitle || confirmedRegistration.eventTitle}</strong> ({confirmedArchiveInfo?.eventDate || event.date})
+                              </span>
+                              <span>Tercatat Real-Time: <strong className="text-[#141414]">{new Date(confirmedRegistration.createdAt).toLocaleString('id-ID')}</strong></span>
                             </div>
+                            {confirmedRegistration.voucherCode && (
+                              <div className="sm:col-span-2 pt-2 border-t border-stone-100">
+                                <span className="text-[11px] text-stone-400 uppercase font-bold block">Kode Voucher Petshop Kompensasi</span>
+                                <strong className="text-xs font-mono bg-[#fff000] text-[#141414] px-2 py-0.5 rounded border border-[#141414] inline-block mt-0.5">
+                                  🎟️ {confirmedRegistration.voucherCode}
+                                </strong>
+                              </div>
+                            )}
                             {confirmedRegistration.vaccineNotes && (
                               <div className="sm:col-span-2 pt-2 border-t border-stone-100">
                                 <span className="text-[11px] text-stone-400 uppercase font-bold block">Keterangan / Kebutuhan Tambahan</span>
@@ -2330,11 +2469,19 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
 
                     <button
                       type="button"
-                      onClick={resetForNewPet}
+                      onClick={() => {
+                        if (event.eventStatus === 'completed') {
+                          setConfirmedRegistration(null);
+                          setConfirmedArchiveInfo(null);
+                          setCurrentStep(1);
+                        } else {
+                          resetForNewPet();
+                        }
+                      }}
                       className="inline-flex items-center gap-2 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold px-5 py-3 rounded-2xl text-sm transition-all shadow-sm"
                     >
                       <PawPrint className="w-4 h-4" />
-                      <span>Daftarkan Anabul Lain</span>
+                      <span>{event.eventStatus === 'completed' ? 'Kembali ke Halaman Event' : 'Daftarkan Anabul Lain'}</span>
                     </button>
                   </div>
                 </div>

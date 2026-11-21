@@ -43,13 +43,21 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
           {availableSummary && (
             <div className="hidden sm:flex items-center gap-2 shrink-0">
-              <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#fff000] opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#fff000]"></span>
-              </span>
-              <span className="text-stone-200">
-                Sisa Kuota: <strong className="font-bold text-[#fff000] underline">{availableSummary.availableSeats}</strong>/{availableSummary.totalSeats} ekor
-              </span>
+              {event.eventStatus === 'completed' ? (
+                <span className="bg-emerald-500 text-white px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide">
+                  ✓ Event Selesai &amp; Terarsip
+                </span>
+              ) : (
+                <>
+                  <span className="flex h-2 w-2 relative">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#fff000] opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-[#fff000]"></span>
+                  </span>
+                  <span className="text-stone-200">
+                    Sisa Kuota: <strong className="font-bold text-[#fff000] underline">{availableSummary.availableSeats}</strong>/{availableSummary.totalSeats} ekor
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>

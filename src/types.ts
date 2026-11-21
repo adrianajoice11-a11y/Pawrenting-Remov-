@@ -165,12 +165,16 @@ export interface EventArchive {
   locationAddress: string;
   city?: string;
   eventDate: string;
+  timeRange?: string;
   month: string;
   year: string;
   partnerName: string;
   partnerLogoUrl?: string;
   programsRun: string[];
   summaryNotes?: string;
+  completionStatement?: string;
+  completedBy?: string;
+  eventStatus?: 'completed';
   documentationPhotos: string[];
   totalRegistrations: number;
   totalAttended: number;
@@ -229,6 +233,11 @@ export interface EventConfig {
   adminPin: string; // PIN for panitia/admin access (default 'remov2026')
   publicShareUrl?: string;
   customShareUrl?: string;
+  eventStatus?: 'active' | 'completed';
+  eventCompletedAt?: string;
+  eventCompletedStatement?: string;
+  eventCompletedBy?: string;
+  lastArchivedId?: string;
 }
 
 export interface GoogleSheetConfig {

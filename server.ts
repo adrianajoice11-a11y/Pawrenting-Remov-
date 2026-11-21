@@ -164,6 +164,7 @@ const defaultInitialData: AppDatabase = {
     },
     holdDurationMinutes: 10,
     adminPin: 'remov2026',
+    eventStatus: 'active',
   },
   vaccines: [
     {
@@ -402,6 +403,11 @@ function parseDbPayload(parsed: any): AppDatabase {
       ? parsed.event.paymentTimeoutHours
       : 2,
     queueCounter: parsed.event?.queueCounter ?? 0,
+    eventStatus: parsed.event?.eventStatus === 'completed' ? 'completed' : 'active',
+    eventCompletedAt: parsed.event?.eventCompletedAt || undefined,
+    eventCompletedStatement: parsed.event?.eventCompletedStatement || '',
+    eventCompletedBy: parsed.event?.eventCompletedBy || '',
+    lastArchivedId: parsed.event?.lastArchivedId || undefined,
     sessions: Array.isArray(parsed.event?.sessions)
       ? parsed.event.sessions
       : defaultInitialData.event.sessions,
@@ -537,8 +543,133 @@ function broadcastDbUpdate(reason = 'db_updated') {
   }
 }
 
+function parseIndonesianScheduleParts(dateStr?: string): { month: string; year: string } {
+  const raw = String(dateStr || '').trim();
+  const months = [
+    'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+    'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+  ];
+  const lower = raw.toLowerCase();
+  const matchedMonth = months.find(m => lower.includes(m.toLowerCase()))
+    || new Date().toLocaleString('id-ID', { month: 'long' });
+  const yearMatch = raw.match(/\b(20\d{2})\b/);
+  const matchedYear = yearMatch ? yearMatch[1] : String(new Date().getFullYear());
+  return { month: matchedMonth, year: matchedYear };
+}
+
+function buildArchiveRecordFromDb(
+  db: AppDatabase,
+  overrides: {
+    id?: string;
+    partnerName?: string;
+    partnerLogoUrl?: string;
+    city?: string;
+    month?: string;
+    year?: string;
+    programsRun?: string[];
+    summaryNotes?: string;
+    completionStatement?: string;
+    completedBy?: string;
+    documentationPhotos?: string[];
+  } = {}
+): EventArchive {
+  const { month: autoMonth, year: autoYear } = parseIndonesianScheduleParts(db.event.date);
+  const vaccineCounts: Record<string, number> = {};
+  db.registrations
+    .filter(r => r.paymentStatus === 'verified')
+    .forEach(r => {
+      vaccineCounts[r.vaccineName] = (vaccineCounts[r.vaccineName] || 0) + 1;
+    });
+
+  return {
+    id: overrides.id || 'arc_' + Date.now(),
+    eventTitle: db.event.title,
+    subtitle: db.event.subtitle,
+    locationName: db.event.locationName,
+    locationAddress: db.event.locationAddress,
+    city: overrides.city || '',
+    eventDate: db.event.date,
+    timeRange: db.event.timeRange,
+    month: (overrides.month && overrides.month.trim()) ? overrides.month.trim() : autoMonth,
+    year: (overrides.year && overrides.year.trim()) ? overrides.year.trim() : autoYear,
+    partnerName: overrides.partnerName || db.event.partnerName || 'REMOV Internal Care',
+    partnerLogoUrl: overrides.partnerLogoUrl || db.event.partnerLogoUrl || '',
+    programsRun: Array.isArray(overrides.programsRun) && overrides.programsRun.length > 0
+      ? overrides.programsRun
+      : db.vaccines.filter(v => v.active !== false).map(v => v.name),
+    summaryNotes: overrides.summaryNotes || '',
+    completionStatement: overrides.completionStatement ?? db.event.eventCompletedStatement ?? '',
+    completedBy: overrides.completedBy ?? db.event.eventCompletedBy ?? 'Tim Admin REMOV',
+    eventStatus: 'completed',
+    documentationPhotos: Array.isArray(overrides.documentationPhotos) ? overrides.documentationPhotos : [],
+    totalRegistrations: db.registrations.length,
+    totalAttended: db.registrations.filter(r => r.checkInStatus === 'sudah_hadir' || r.checkInStatus === 'selesai_vaksin').length,
+    totalVaccinatedByVaccine: Object.entries(vaccineCounts).map(([vaccineName, count]) => ({ vaccineName, count })),
+    registrations: [...db.registrations],
+    archivedAt: new Date().toISOString(),
+  };
+}
+
+function syncLinkedCompletedArchive(data: AppDatabase) {
+  if (data.event.eventStatus !== 'completed' || !data.event.lastArchivedId) return;
+  const idx = data.archives.findIndex(a => a.id === data.event.lastArchivedId);
+  if (idx < 0) return;
+  const existing = data.archives[idx];
+  const refreshed = buildArchiveRecordFromDb(data, {
+    id: existing.id,
+    partnerName: existing.partnerName,
+    partnerLogoUrl: existing.partnerLogoUrl,
+    city: existing.city,
+    month: existing.month,
+    year: existing.year,
+    programsRun: existing.programsRun,
+    summaryNotes: existing.summaryNotes,
+    completionStatement: data.event.eventCompletedStatement || existing.completionStatement,
+    completedBy: data.event.eventCompletedBy || existing.completedBy,
+    documentationPhotos: existing.documentationPhotos,
+  });
+  data.archives[idx] = refreshed;
+}
+
+function normalizePhoneDigits(phone: string): string {
+  const digits = String(phone || '').replace(/\D/g, '');
+  if (digits.startsWith('62')) return '0' + digits.slice(2);
+  return digits;
+}
+
+function matchRegistrationQuery(r: Registration, rawQuery: string): boolean {
+  const trimmed = rawQuery.trim();
+  if (!trimmed) return false;
+  const upper = trimmed.toUpperCase();
+  const isDigitsOnly = /^\d+$/.test(trimmed);
+  const paddedQueue = isDigitsOnly ? trimmed.padStart(2, '0') : '';
+  const queryPhoneNorm = normalizePhoneDigits(trimmed);
+  const regPhoneNorm = normalizePhoneDigits(r.ownerPhone);
+
+  if (r.id === trimmed) return true;
+  if (r.regNumber.toUpperCase() === upper) return true;
+  if (r.barcodeCode && r.barcodeCode.toUpperCase() === upper) return true;
+  if (r.queueNumber) {
+    const qUpper = r.queueNumber.toUpperCase();
+    if (qUpper === upper || (paddedQueue && qUpper === paddedQueue) || `Q${qUpper}` === upper) {
+      return true;
+    }
+  }
+  if (queryPhoneNorm.length >= 6 && regPhoneNorm && (regPhoneNorm === queryPhoneNorm || regPhoneNorm.endsWith(queryPhoneNorm))) {
+    return true;
+  }
+  if (trimmed.length >= 2) {
+    const lower = trimmed.toLowerCase();
+    if (r.ownerName.toLowerCase().includes(lower) || r.petName.toLowerCase().includes(lower)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function writeDb(data: AppDatabase) {
   try {
+    syncLinkedCompletedArchive(data);
     const cleanData: AppDatabase = {
       ...data,
       event: sanitizeEventForDisk(data.event),
@@ -939,6 +1070,14 @@ async function startServer() {
       const db = readDb();
       cleanExpiredHoldsAndBookings(db);
 
+      if (db.event.eventStatus === 'completed') {
+        return res.status(409).json({
+          success: false,
+          eventCompleted: true,
+          message: 'Event ini telah dinyatakan selesai oleh Tim Admin REMOV. Data peserta yang sudah terdaftar telah tersimpan otomatis sesuai jadwal event.'
+        });
+      }
+
       const vaccine = isNoVaccine
         ? {
             id: 'no-vaccine',
@@ -1138,7 +1277,7 @@ async function startServer() {
     });
   });
 
-  // 5. ADMIN / PANITIA: Check Registration Status / Barcode / Queue Lookup
+  // 5. ADMIN / PANITIA: Check Registration Status / Barcode / Queue Lookup (Active + Archived Events)
   app.get('/api/registrations/:idOrNumber', (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
@@ -1149,21 +1288,148 @@ async function startServer() {
     if (cleanExpiredHoldsAndBookings(db)) {
       writeDb(db);
     }
-    const upper = rawQuery.toUpperCase();
-    const item = db.registrations.find(
-      r =>
-        r.id === rawQuery ||
-        r.regNumber.toUpperCase() === upper ||
-        (r.queueNumber && (r.queueNumber.toUpperCase() === upper || r.queueNumber === rawQuery.padStart(2, '0'))) ||
-        (r.barcodeCode && r.barcodeCode.toUpperCase() === upper) ||
-        r.ownerPhone === rawQuery
-    );
 
-    if (!item) {
-      return res.status(404).json({ success: false, message: 'Data pendaftaran / Nomor Antrian tidak ditemukan.' });
+    // Prioritize exact ID / RegNumber / Queue / Barcode / Phone before fuzzy name match
+    const upper = rawQuery.toUpperCase();
+    const padded = /^\d+$/.test(rawQuery) ? rawQuery.padStart(2, '0') : '';
+    const exactFind = (list: Registration[]) =>
+      list.find(
+        r =>
+          r.id === rawQuery ||
+          r.regNumber.toUpperCase() === upper ||
+          (r.barcodeCode && r.barcodeCode.toUpperCase() === upper) ||
+          (r.queueNumber && (r.queueNumber.toUpperCase() === upper || (padded && r.queueNumber === padded) || `Q${r.queueNumber}` === upper)) ||
+          (normalizePhoneDigits(rawQuery).length >= 6 && normalizePhoneDigits(r.ownerPhone) === normalizePhoneDigits(rawQuery))
+      ) || list.find(r => matchRegistrationQuery(r, rawQuery));
+
+    const activeMatch = exactFind(db.registrations);
+    if (activeMatch) {
+      const publicEvt = { ...db.event };
+      delete (publicEvt as any).adminPin;
+      return res.json({
+        success: true,
+        registration: activeMatch,
+        event: publicEvt,
+        isArchived: false,
+      });
     }
 
-    res.json({ success: true, registration: item, event: db.event });
+    // Fallback: search completed/archived events so historical customer records remain retrievable by schedule!
+    for (const arc of db.archives) {
+      if (!Array.isArray(arc.registrations) || arc.registrations.length === 0) continue;
+      const archivedItem = exactFind(arc.registrations);
+      if (archivedItem) {
+        const arcEvent = {
+          ...db.event,
+          title: arc.eventTitle || db.event.title,
+          date: arc.eventDate || db.event.date,
+          timeRange: arc.timeRange || db.event.timeRange,
+          locationName: arc.locationName || db.event.locationName,
+          locationAddress: arc.locationAddress || db.event.locationAddress,
+          partnerName: arc.partnerName || db.event.partnerName,
+          eventStatus: 'completed' as const,
+          eventCompletedStatement: arc.completionStatement || db.event.eventCompletedStatement || '',
+          eventCompletedAt: arc.archivedAt,
+        };
+        delete (arcEvent as any).adminPin;
+        return res.json({
+          success: true,
+          registration: archivedItem,
+          event: arcEvent,
+          isArchived: true,
+          archiveInfo: {
+            id: arc.id,
+            eventTitle: arc.eventTitle,
+            eventDate: arc.eventDate,
+            timeRange: arc.timeRange,
+            month: arc.month,
+            year: arc.year,
+            locationName: arc.locationName,
+            partnerName: arc.partnerName,
+            completionStatement: arc.completionStatement,
+            archivedAt: arc.archivedAt,
+          },
+        });
+      }
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: 'Data pendaftaran / Nomor Antrian tidak ditemukan pada jadwal event aktif maupun arsip.'
+    });
+  });
+
+  // 5a. ADMIN: Real-time Ticket & Check-In Directory (Active + Archived Search)
+  app.get('/api/admin/ticket-directory', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    const db = readDb();
+    if (cleanExpiredHoldsAndBookings(db)) {
+      writeDb(db);
+    }
+
+    const q = String(req.query.q || '').trim();
+    const activeRegistrations = q
+      ? db.registrations.filter(r => matchRegistrationQuery(r, q))
+      : db.registrations;
+
+    const archivedMatches: Array<{
+      registration: Registration;
+      archiveInfo: {
+        id: string;
+        eventTitle: string;
+        eventDate: string;
+        timeRange?: string;
+        month: string;
+        year: string;
+        locationName: string;
+        partnerName: string;
+        completionStatement?: string;
+        archivedAt: string;
+      };
+    }> = [];
+
+    if (q) {
+      for (const arc of db.archives) {
+        if (!Array.isArray(arc.registrations)) continue;
+        for (const r of arc.registrations) {
+          if (matchRegistrationQuery(r, q)) {
+            archivedMatches.push({
+              registration: r,
+              archiveInfo: {
+                id: arc.id,
+                eventTitle: arc.eventTitle,
+                eventDate: arc.eventDate,
+                timeRange: arc.timeRange,
+                month: arc.month,
+                year: arc.year,
+                locationName: arc.locationName,
+                partnerName: arc.partnerName,
+                completionStatement: arc.completionStatement,
+                archivedAt: arc.archivedAt,
+              },
+            });
+          }
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      eventStatus: db.event.eventStatus || 'active',
+      eventCompletedAt: db.event.eventCompletedAt,
+      eventCompletedStatement: db.event.eventCompletedStatement || '',
+      eventCompletedBy: db.event.eventCompletedBy || '',
+      eventTitle: db.event.title,
+      eventDate: db.event.date,
+      eventTimeRange: db.event.timeRange,
+      activeRegistrations,
+      totalActiveCount: db.registrations.length,
+      archivedMatches: archivedMatches.slice(0, 20),
+      serverTime: Date.now(),
+    });
   });
 
   // 5b. ADMIN: Booth Barcode Check-In / Status Update (POST /api/admin/registrations/:id/check-in)
@@ -1294,6 +1560,11 @@ async function startServer() {
     const incoming = { ...(req.body || {}) };
     delete incoming.publicShareUrl;
     delete incoming.queueCounter;
+    delete incoming.eventStatus;
+    delete incoming.eventCompletedAt;
+    delete incoming.eventCompletedStatement;
+    delete incoming.eventCompletedBy;
+    delete incoming.lastArchivedId;
 
     const updatedChecklist = Array.isArray(incoming.healthChecklistItems)
       ? incoming.healthChecklistItems
@@ -1309,6 +1580,11 @@ async function startServer() {
       ...incoming,
       adminPin: nextAdminPin,
       queueCounter: db.event.queueCounter,
+      eventStatus: db.event.eventStatus,
+      eventCompletedAt: db.event.eventCompletedAt,
+      eventCompletedStatement: db.event.eventCompletedStatement,
+      eventCompletedBy: db.event.eventCompletedBy,
+      lastArchivedId: db.event.lastArchivedId,
       healthChecklistItems: updatedChecklist,
       termsAndConditions: Array.isArray(updatedChecklist)
         ? updatedChecklist.map((c: HealthChecklistItem) => c.text)
@@ -1607,7 +1883,108 @@ async function startServer() {
     res.json({ success: true, message: 'Voucher dihapus.' });
   });
 
-  // 14. ADMIN: Event Archive & Portfolio Management + Reset Queue Counter for Next Event
+  // 14a. ADMIN: Official Statement That Team Admin Completed Event -> Auto-Save Schedule Archive & Keep Live Data Synced
+  app.post('/api/admin/events/complete', (req, res) => {
+    const {
+      statement,
+      completedBy,
+      partnerName,
+      partnerLogoUrl,
+      city,
+      summaryNotes,
+      documentationPhotos,
+      programsRun,
+    } = req.body || {};
+
+    const db = readDb();
+    const defaultStatement = `Tim Admin REMOV menyatakan bahwa acara "${db.event.title}" pada jadwal ${db.event.date} (${db.event.timeRange}) di ${db.event.locationName} telah selesai dilaksanakan. Seluruh data peserta telah tersimpan otomatis sesuai jadwal pelaksanaan.`;
+
+    db.event.eventStatus = 'completed';
+    db.event.eventCompletedAt = new Date().toISOString();
+    db.event.eventCompletedStatement = (statement && String(statement).trim())
+      ? String(statement).trim()
+      : defaultStatement;
+    db.event.eventCompletedBy = (completedBy && String(completedBy).trim())
+      ? String(completedBy).trim()
+      : 'Tim Admin REMOV';
+
+    // Match existing archive for the same event schedule or lastArchivedId so no duplicate archive is created
+    const existingIdx = db.event.lastArchivedId
+      ? db.archives.findIndex(a => a.id === db.event.lastArchivedId)
+      : db.archives.findIndex(a => a.eventTitle === db.event.title && a.eventDate === db.event.date);
+
+    const archiveRecord = buildArchiveRecordFromDb(db, {
+      id: existingIdx >= 0 ? db.archives[existingIdx].id : undefined,
+      partnerName,
+      partnerLogoUrl,
+      city,
+      programsRun,
+      summaryNotes,
+      completionStatement: db.event.eventCompletedStatement,
+      completedBy: db.event.eventCompletedBy,
+      documentationPhotos: Array.isArray(documentationPhotos)
+        ? documentationPhotos
+        : (existingIdx >= 0 ? db.archives[existingIdx].documentationPhotos : []),
+    });
+
+    if (existingIdx >= 0) {
+      db.archives[existingIdx] = archiveRecord;
+    } else {
+      db.archives.unshift(archiveRecord);
+    }
+
+    db.event.lastArchivedId = archiveRecord.id;
+    writeDb(db);
+
+    if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
+      const cleanItems = db.registrations.map(r => ({
+        ...r,
+        paymentProofUrl: formatProofUrlForSheet(r, req),
+      }));
+      syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+        action: 'EVENT_COMPLETED_FINAL_SYNC',
+        eventTitle: db.event.title,
+        eventDate: db.event.date,
+        timeRange: db.event.timeRange,
+        completionStatement: db.event.eventCompletedStatement,
+        completedAt: db.event.eventCompletedAt,
+        count: cleanItems.length,
+        items: cleanItems,
+        spreadsheetConfig: db.event.spreadsheetConfig,
+        timestamp: new Date().toISOString(),
+      }).catch(console.error);
+    }
+
+    res.json({
+      success: true,
+      event: {
+        ...db.event,
+        publicShareUrl: resolvePublicShareUrl(db, req),
+      },
+      archive: archiveRecord,
+      message: `Event dinyatakan selesai oleh ${db.event.eventCompletedBy} & seluruh data (${db.registrations.length} peserta) otomatis tersimpan ke arsip jadwal ${db.event.date}!`,
+    });
+  });
+
+  // 14b. ADMIN: Reopen Completed Event Back to Active
+  app.post('/api/admin/events/reopen', (req, res) => {
+    const db = readDb();
+    db.event.eventStatus = 'active';
+    db.event.eventCompletedAt = undefined;
+    db.event.eventCompletedStatement = '';
+    db.event.eventCompletedBy = '';
+    writeDb(db);
+    res.json({
+      success: true,
+      event: {
+        ...db.event,
+        publicShareUrl: resolvePublicShareUrl(db, req),
+      },
+      message: 'Status event dibuka kembali menjadi AKTIF sehingga formulir & pembaruan pendaftaran berjalan normal.',
+    });
+  });
+
+  // 14. ADMIN: Event Archive & Portfolio Management + Reset Queue Counter for Next Scheduled Event
   app.post('/api/admin/events/archive-and-reset', (req, res) => {
     const {
       partnerName,
@@ -1617,60 +1994,65 @@ async function startServer() {
       year,
       programsRun,
       summaryNotes,
+      completionStatement,
+      completedBy,
       documentationPhotos,
       resetRegistrations,
       nextEventTitle,
-      nextEventDate
+      nextEventDate,
+      nextTimeRange,
+      nextLocationName,
     } = req.body;
 
     const db = readDb();
-    const vaccineCounts: Record<string, number> = {};
-    db.registrations
-      .filter(r => r.paymentStatus === 'verified')
-      .forEach(r => {
-        vaccineCounts[r.vaccineName] = (vaccineCounts[r.vaccineName] || 0) + 1;
-      });
+    const existingIdx = db.event.lastArchivedId
+      ? db.archives.findIndex(a => a.id === db.event.lastArchivedId)
+      : -1;
 
-    const newArchive: EventArchive = {
-      id: 'arc_' + Date.now(),
-      eventTitle: db.event.title,
-      subtitle: db.event.subtitle,
-      locationName: db.event.locationName,
-      locationAddress: db.event.locationAddress,
-      city: city || '',
-      eventDate: db.event.date,
-      month: month || new Date().toLocaleString('id-ID', { month: 'long' }),
-      year: year || String(new Date().getFullYear()),
-      partnerName: partnerName || db.event.partnerName || 'REMOV Internal Care',
-      partnerLogoUrl: partnerLogoUrl || db.event.partnerLogoUrl || '',
-      programsRun: Array.isArray(programsRun) && programsRun.length > 0
-        ? programsRun
-        : db.vaccines.filter(v => v.active).map(v => v.name),
-      summaryNotes: summaryNotes || '',
-      documentationPhotos: Array.isArray(documentationPhotos) ? documentationPhotos : [],
-      totalRegistrations: db.registrations.length,
-      totalAttended: db.registrations.filter(r => r.checkInStatus === 'sudah_hadir' || r.checkInStatus === 'selesai_vaksin').length,
-      totalVaccinatedByVaccine: Object.entries(vaccineCounts).map(([vaccineName, count]) => ({ vaccineName, count })),
-      registrations: [...db.registrations],
-      archivedAt: new Date().toISOString(),
-    };
+    const newArchive = buildArchiveRecordFromDb(db, {
+      id: existingIdx >= 0 ? db.archives[existingIdx].id : undefined,
+      partnerName,
+      partnerLogoUrl,
+      city,
+      month,
+      year,
+      programsRun,
+      summaryNotes,
+      completionStatement: completionStatement || db.event.eventCompletedStatement || `Event ${db.event.title} (${db.event.date}) selesai dilaksanakan dan diarsipkan oleh Tim Admin REMOV.`,
+      completedBy: completedBy || db.event.eventCompletedBy || 'Tim Admin REMOV',
+      documentationPhotos: Array.isArray(documentationPhotos) && documentationPhotos.length > 0
+        ? documentationPhotos
+        : (existingIdx >= 0 ? db.archives[existingIdx].documentationPhotos : []),
+    });
 
-    db.archives.unshift(newArchive);
+    if (existingIdx >= 0) {
+      db.archives[existingIdx] = newArchive;
+    } else {
+      db.archives.unshift(newArchive);
+    }
 
-    // Reset queue counter back to 0 so the next event starts cleanly from 01 again!
+    // Reset queue counter & completion flags cleanly for the next scheduled event
     db.event.queueCounter = 0;
+    db.event.eventStatus = 'active';
+    db.event.eventCompletedAt = undefined;
+    db.event.eventCompletedStatement = '';
+    db.event.eventCompletedBy = '';
+    db.event.lastArchivedId = undefined;
+
     if (resetRegistrations !== false) {
       db.registrations = [];
       db.holds = [];
     }
     if (nextEventTitle) db.event.title = nextEventTitle;
     if (nextEventDate) db.event.date = nextEventDate;
+    if (nextTimeRange) db.event.timeRange = nextTimeRange;
+    if (nextLocationName) db.event.locationName = nextLocationName;
 
     writeDb(db);
     res.json({
       success: true,
       archive: newArchive,
-      message: 'Event berhasil diarsipkan ke Portofolio REMOV & nomor antrian direset kembali ke 01 untuk acara berikutnya!'
+      message: 'Event berhasil diarsipkan sesuai jadwal ke Portofolio REMOV & nomor antrian direset kembali ke 01 untuk jadwal event berikutnya!'
     });
   });
 

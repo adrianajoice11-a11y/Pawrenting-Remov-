@@ -102,7 +102,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newChecklistText, setNewChecklistText] = useState('');
   const [newSessionText, setNewSessionText] = useState('');
   const lastSyncedEventJsonRef = useRef<string>('');
+  const eventFormRef = useRef<EventConfig | null>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    eventFormRef.current = eventForm;
+  }, [eventForm]);
+
+  // Team Admin Event Completion State
+  const [isCompleteEventModalOpen, setIsCompleteEventModalOpen] = useState(false);
+  const [isCompletingEvent, setIsCompletingEvent] = useState(false);
+  const [eventActionFeedback, setEventActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [completeEventForm, setCompleteEventForm] = useState({
+    statement: '',
+    completedBy: 'Tim Admin REMOV',
+    city: '',
+    summaryNotes: '',
+    documentationPhotos: [] as string[],
+  });
 
   const notifyPublicSync = () => {
     try {
@@ -177,8 +194,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const fetchAdminData = async () => {
-    setIsLoading(true);
+  const fetchAdminData = async (silent = false) => {
+    if (!silent) setIsLoading(true);
     try {
       const res = await fetch(`/api/admin/data?_t=${Date.now()}`, { cache: 'no-store' });
       const data = await res.json();
@@ -186,8 +203,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setAdminData(data);
         setSheetWebhookUrl(data.sheetConfig.webhookUrl || '');
         setSheetAutoSync(data.sheetConfig.autoSync ?? true);
+
+        const currentForm = eventFormRef.current;
+        const hasUnsavedFormEdits = !!currentForm
+          && !!lastSyncedEventJsonRef.current
+          && JSON.stringify(currentForm) !== lastSyncedEventJsonRef.current;
+
         lastSyncedEventJsonRef.current = JSON.stringify(data.event);
-        setEventForm(data.event);
+        if (!hasUnsavedFormEdits) {
+          setEventForm(data.event);
+        }
+
         setArchiveResetForm(prev => ({
           ...prev,
           partnerName: prev.partnerName || data.event.partnerName || '',
@@ -199,14 +225,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     } catch (err) {
       console.error('Error fetching admin data:', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchAdminData();
+    fetchAdminData(false);
     fetchFolders();
+
+    let evtSource: EventSource | null = null;
+    if (typeof EventSource !== 'undefined') {
+      evtSource = new EventSource('/api/events/stream');
+      evtSource.onmessage = (msg) => {
+        try {
+          const parsed = JSON.parse(msg.data);
+          if (parsed?.type === 'update') {
+            fetchAdminData(true);
+          }
+        } catch {
+          // Ignore heartbeat
+        }
+      };
+    }
+
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      bc = new BroadcastChannel('remov_event_sync');
+      bc.onmessage = () => fetchAdminData(true);
+    }
+
+    const pollTimer = setInterval(() => {
+      fetchAdminData(true);
+    }, 8000);
+
     return () => {
+      clearInterval(pollTimer);
+      evtSource?.close();
+      bc?.close();
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
   }, []);
@@ -583,9 +638,63 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     fetchAdminData();
   };
 
+  const openCompleteEventModal = () => {
+    if (!adminData) return;
+    const ev = adminData.event;
+    setCompleteEventForm({
+      statement: ev.eventCompletedStatement || `Tim Admin REMOV menyatakan bahwa acara "${ev.title}"${ev.partnerName ? ` bersama ${ev.partnerName}` : ''} pada jadwal ${ev.date} (${ev.timeRange}) di ${ev.locationName} telah selesai dilaksanakan. Seluruh data peserta tersimpan otomatis sesuai jadwal pelaksanaan.`,
+      completedBy: ev.eventCompletedBy || 'Tim Admin REMOV',
+      city: '',
+      summaryNotes: '',
+      documentationPhotos: [],
+    });
+    setIsCompleteEventModalOpen(true);
+  };
+
+  const handleConfirmCompleteEvent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsCompletingEvent(true);
+    setEventActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/events/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(completeEventForm),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || 'Gagal menyelesaikan event.');
+      }
+      setIsCompleteEventModalOpen(false);
+      setEventActionFeedback({ type: 'success', message: data.message });
+      await fetchAdminData(true);
+      notifyPublicSync();
+    } catch (err: any) {
+      setEventActionFeedback({ type: 'error', message: err?.message || 'Gagal menyelesaikan event.' });
+    } finally {
+      setIsCompletingEvent(false);
+    }
+  };
+
+  const handleReopenEvent = async () => {
+    setEventActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/events/reopen', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setEventActionFeedback({ type: 'success', message: data.message });
+        await fetchAdminData(true);
+        notifyPublicSync();
+      }
+    } catch (err: any) {
+      setEventActionFeedback({ type: 'error', message: err?.message || 'Gagal membuka kembali event.' });
+    }
+  };
+
   // Archive & Reset Queue Action
   const handleArchiveAndResetEvent = async (e: React.FormEvent) => {
     e.preventDefault();
+    setEventActionFeedback(null);
     try {
       const res = await fetch('/api/admin/events/archive-and-reset', {
         method: 'POST',
@@ -601,12 +710,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const data = await res.json();
       if (data.success) {
         setIsArchiveResetModalOpen(false);
-        alert(data.message);
-        fetchAdminData();
-        onRefreshParent();
+        setEventActionFeedback({ type: 'success', message: data.message });
+        await fetchAdminData(true);
+        notifyPublicSync();
       }
     } catch (err: any) {
-      alert(err.message || 'Gagal mengarsipkan event.');
+      setEventActionFeedback({ type: 'error', message: err.message || 'Gagal mengarsipkan event.' });
     }
   };
 
@@ -878,7 +987,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={fetchAdminData}
+            onClick={() => fetchAdminData(false)}
             title="Refresh Data"
             className="p-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 transition-colors"
           >
@@ -999,6 +1108,82 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
+          {eventActionFeedback && (
+            <div className={`px-4 py-3 rounded-2xl text-xs font-bold flex items-center justify-between border ${
+              eventActionFeedback.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                : 'bg-rose-50 text-rose-800 border-rose-300'
+            }`}>
+              <span>{eventActionFeedback.message}</span>
+              <button
+                type="button"
+                onClick={() => setEventActionFeedback(null)}
+                className="px-1.5 opacity-70 hover:opacity-100 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* Event Lifecycle & Real-Time Completion Statement Banner */}
+          <div className={`rounded-3xl p-5 border-2 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4 ${
+            adminData.event.eventStatus === 'completed'
+              ? 'bg-emerald-50 border-emerald-500 text-emerald-950'
+              : 'bg-yellow-50/70 border-[#141414] text-[#141414]'
+          }`}>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full ${
+                  adminData.event.eventStatus === 'completed'
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-[#141414] text-[#fff000]'
+                }`}>
+                  {adminData.event.eventStatus === 'completed'
+                    ? '✓ Event Dinyatakan Selesai & Tersimpan Sesuai Jadwal'
+                    : '● Event Berjalan (Sinkron Real-Time)'}
+                </span>
+                <span className="text-xs font-bold text-stone-600">
+                  Jadwal: {adminData.event.date} • {adminData.event.timeRange}
+                </span>
+              </div>
+              <p className="text-xs leading-relaxed">
+                {adminData.event.eventStatus === 'completed'
+                  ? (adminData.event.eventCompletedStatement || 'Tim Admin telah menyatakan event selesai dan data peserta tersimpan otomatis di Arsip.')
+                  : 'Seluruh data customer yang mengisi form terupdate secara real-time hingga Tim Admin menyatakan event ini selesai.'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {adminData.event.eventStatus === 'completed' ? (
+                <button
+                  type="button"
+                  onClick={handleReopenEvent}
+                  className="inline-flex items-center gap-1.5 bg-white hover:bg-stone-100 text-[#141414] border-2 border-[#141414] text-xs font-bold px-3.5 py-2.5 rounded-xl cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Buka Kembali Event</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={openCompleteEventModal}
+                  className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl shadow-xs cursor-pointer"
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  <span>Nyatakan Event Selesai &amp; Simpan Data</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsArchiveResetModalOpen(true)}
+                className="inline-flex items-center gap-1.5 bg-[#141414] hover:bg-black text-[#fff000] text-xs font-extrabold px-4 py-2.5 rounded-xl transition-all cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Mulai Jadwal Baru (Reset 01)</span>
+              </button>
+            </div>
+          </div>
+
           {/* Monitor Antrian Booth Real-time (Siapa Belum Datang / Sudah Hadir) */}
           <div className="bg-white rounded-3xl p-6 border-2 border-stone-200 shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
@@ -1013,7 +1198,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <button
                 onClick={() => setIsArchiveResetModalOpen(true)}
-                className="inline-flex items-center gap-1.5 bg-[#141414] hover:bg-black text-[#fff000] text-xs font-extrabold px-4 py-2.5 rounded-xl transition-all shrink-0"
+                className="inline-flex items-center gap-1.5 bg-[#141414] hover:bg-black text-[#fff000] text-xs font-extrabold px-4 py-2.5 rounded-xl transition-all shrink-0 cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>Selesaikan Event & Reset Antrian ke 01</span>
@@ -2098,16 +2283,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             <div className="flex flex-wrap gap-2 shrink-0">
+              {adminData.event.eventStatus !== 'completed' && (
+                <button
+                  type="button"
+                  onClick={openCompleteEventModal}
+                  className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl cursor-pointer"
+                >
+                  <CheckCircle className="w-4 h-4" />
+                  <span>Nyatakan Event Selesai (Simpan Sesuai Jadwal)</span>
+                </button>
+              )}
               <button
                 onClick={() => setIsManualArchiveModalOpen(true)}
-                className="inline-flex items-center gap-1.5 bg-stone-800 hover:bg-stone-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl border border-stone-600"
+                className="inline-flex items-center gap-1.5 bg-stone-800 hover:bg-stone-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl border border-stone-600 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 <span>Tambah Portofolio Manual</span>
               </button>
               <button
                 onClick={() => setIsArchiveResetModalOpen(true)}
-                className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] text-xs font-extrabold px-4 py-2.5 rounded-xl"
+                className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] text-xs font-extrabold px-4 py-2.5 rounded-xl cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
                 <span>Arsipkan Event Ini & Reset Antrian ke 01</span>
@@ -2198,8 +2393,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <div className="flex items-start gap-2">
                         <Calendar className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
                         <div>
-                          <span className="text-stone-400 block text-[10px] uppercase font-bold">Tanggal Event</span>
+                          <span className="text-stone-400 block text-[10px] uppercase font-bold">Jadwal Event</span>
                           <strong className="text-[#141414]">{arc.eventDate}</strong>
+                          {arc.timeRange && <span className="block text-stone-500">{arc.timeRange}</span>}
                         </div>
                       </div>
                       <div className="col-span-2 flex items-start gap-2">
@@ -2235,6 +2431,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </span>
                           ))}
                         </div>
+                      </div>
+                    )}
+
+                    {arc.completionStatement && (
+                      <div className="bg-emerald-50 p-3 rounded-xl border border-emerald-200 text-emerald-950 space-y-1">
+                        <span className="text-[10px] font-extrabold uppercase text-emerald-700 block">
+                          Pernyataan Selesai ({arc.completedBy || 'Tim Admin REMOV'})
+                        </span>
+                        <p className="leading-relaxed">{arc.completionStatement}</p>
                       </div>
                     )}
 
@@ -3166,7 +3371,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-5">
           <div className="flex items-center justify-between border-b border-stone-100 pb-4">
             <h2 className="font-heading font-bold text-lg text-[#141414]">Monitor Slot Terkunci (Hold Checkout)</h2>
-            <button onClick={fetchAdminData} className="p-2 bg-stone-100 rounded-xl text-xs font-bold">Refresh</button>
+            <button onClick={() => fetchAdminData(false)} className="p-2 bg-stone-100 rounded-xl text-xs font-bold">Refresh</button>
           </div>
           {adminData.holds.length === 0 ? (
             <div className="py-10 text-center text-stone-400 text-sm">
@@ -3440,14 +3645,117 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
+      {/* Complete Event Official Statement Modal */}
+      {isCompleteEventModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl border-2 border-[#141414] space-y-4 my-8">
+            <div className="flex items-center justify-between border-b pb-3">
+              <div>
+                <h3 className="font-heading font-bold text-lg text-[#141414]">
+                  Pernyataan Tim Admin: Event Selesai Dilaksanakan
+                </h3>
+                <p className="text-[11px] text-stone-500">
+                  Jadwal Event: <strong>{adminData.event.date}</strong> ({adminData.event.timeRange}) • {adminData.event.locationName}
+                </p>
+              </div>
+              <button type="button" onClick={() => setIsCompleteEventModalOpen(false)}>✕</button>
+            </div>
+            <form onSubmit={handleConfirmCompleteEvent} className="space-y-3 text-xs">
+              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-emerald-950">
+                Seluruh data <strong>{adminData.registrations.length} peserta</strong> akan otomatis tersimpan ke Arsip sesuai jadwal event <strong>{adminData.event.date}</strong> dan langsung tersinkron real-time ke seluruh perangkat customer.
+              </div>
+              <div>
+                <label className="font-bold block mb-1">Pernyataan Resmi Tim Admin *</label>
+                <textarea
+                  required
+                  rows={3}
+                  value={completeEventForm.statement}
+                  onChange={e => setCompleteEventForm({ ...completeEventForm, statement: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300"
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="font-bold block mb-1">Dinyatakan Oleh (Tim / PIC Admin)</label>
+                  <input
+                    type="text"
+                    value={completeEventForm.completedBy}
+                    onChange={e => setCompleteEventForm({ ...completeEventForm, completedBy: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-stone-300"
+                  />
+                </div>
+                <div>
+                  <label className="font-bold block mb-1">Kota Pelaksanaan</label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Bandung / Jakarta Selatan"
+                    value={completeEventForm.city}
+                    onChange={e => setCompleteEventForm({ ...completeEventForm, city: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl border border-stone-300"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="font-bold block mb-1">Catatan Tambahan Portofolio (Opsional)</label>
+                <textarea
+                  rows={2}
+                  value={completeEventForm.summaryNotes}
+                  onChange={e => setCompleteEventForm({ ...completeEventForm, summaryNotes: e.target.value })}
+                  placeholder="Catatan pelaksanaan acara, tingkat kehadiran, dll..."
+                  className="w-full px-3 py-2 rounded-xl border border-stone-300"
+                />
+              </div>
+              <div>
+                <label className="font-bold block mb-1">Upload Foto Dokumentasi Acara (Opsional)</label>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) {
+                      handleUploadAssetToFolder('archives', f, (url) => {
+                        setCompleteEventForm(prev => ({ ...prev, documentationPhotos: [...prev.documentationPhotos, url] }));
+                      });
+                    }
+                  }}
+                  className="block w-full text-xs"
+                />
+                {completeEventForm.documentationPhotos.length > 0 && (
+                  <div className="flex gap-2 mt-2 flex-wrap">
+                    {completeEventForm.documentationPhotos.map((u, i) => (
+                      <img key={i} src={u} alt="Doc" className="h-14 w-14 object-cover rounded-lg border" />
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setIsCompleteEventModalOpen(false)} className="px-4 py-2 border rounded-xl font-bold cursor-pointer">Batal</button>
+                <button
+                  type="submit"
+                  disabled={isCompletingEvent}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl cursor-pointer"
+                >
+                  {isCompletingEvent ? 'Menyimpan...' : 'Nyatakan Event Selesai & Simpan Otomatis'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Archive Event & Reset Queue Modal */}
       {isArchiveResetModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl border-2 border-[#141414] space-y-4 my-8">
             <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="font-heading font-bold text-lg text-[#141414]">
-                Arsipkan Event & Reset Antrian Kembali ke 01
-              </h3>
+              <div>
+                <h3 className="font-heading font-bold text-lg text-[#141414]">
+                  Arsipkan Event &amp; Reset Antrian Kembali ke 01
+                </h3>
+                <p className="text-[11px] text-stone-500">
+                  Otomatis menyimpan arsip jadwal: <strong>{adminData.event.date}</strong> ({adminData.event.timeRange})
+                </p>
+              </div>
               <button onClick={() => setIsArchiveResetModalOpen(false)}>✕</button>
             </div>
             <form onSubmit={handleArchiveAndResetEvent} className="space-y-3 text-xs">
@@ -3467,6 +3775,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div>
                   <label className="font-bold block mb-1">Tahun</label>
                   <input type="text" value={archiveResetForm.year} onChange={e => setArchiveResetForm({ ...archiveResetForm, year: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-stone-300" />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-stone-50 p-3 rounded-2xl border border-stone-200">
+                <div>
+                  <label className="font-bold block mb-1 text-stone-700">Judul Event Jadwal Berikutnya</label>
+                  <input type="text" value={archiveResetForm.nextEventTitle} onChange={e => setArchiveResetForm({ ...archiveResetForm, nextEventTitle: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white" />
+                </div>
+                <div>
+                  <label className="font-bold block mb-1 text-stone-700">Tanggal Jadwal Event Berikutnya</label>
+                  <input type="text" value={archiveResetForm.nextEventDate} onChange={e => setArchiveResetForm({ ...archiveResetForm, nextEventDate: e.target.value })} className="w-full px-3 py-2 rounded-xl border border-stone-300 bg-white" />
                 </div>
               </div>
               <div>
@@ -3502,12 +3820,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <label className="flex items-center gap-2 font-bold text-[#141414] bg-yellow-50 p-3 rounded-xl border border-[#141414]/20">
                 <input type="checkbox" checked={archiveResetForm.resetRegistrations} onChange={e => setArchiveResetForm({ ...archiveResetForm, resetRegistrations: e.target.checked })} />
-                <span>Kosongkan daftar pendaftar aktif & reset Nomor Antrian mulai dari 01 untuk event berikutnya</span>
+                <span>Kosongkan daftar pendaftar aktif & reset Nomor Antrian mulai dari 01 untuk jadwal event berikutnya</span>
               </label>
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setIsArchiveResetModalOpen(false)} className="px-4 py-2 border rounded-xl font-bold">Batal</button>
                 <button type="submit" className="px-5 py-2.5 bg-[#fff000] border-2 border-[#141414] text-[#141414] font-extrabold rounded-xl">
-                  Simpan Arsip & Reset ke 01
+                  Simpan Arsip &amp; Reset ke 01
                 </button>
               </div>
             </form>

@@ -197,6 +197,7 @@ export default function App() {
           <CheckTicketModal
             event={event}
             onBackToForm={() => setActiveTab('form')}
+            onRefreshParent={fetchEventData}
           />
         )}
 
