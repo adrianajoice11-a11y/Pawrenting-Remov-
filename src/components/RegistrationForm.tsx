@@ -181,7 +181,12 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         setSavedRegError(`Data pendaftaran ${refItem.regNumber} sudah tidak berada di event aktif saat ini (kemungkinan sudah diarsipkan oleh panitia).`);
         return;
       }
-      persistRegistrationRef(data.registration);
+      persistRegistrationRef(data.registration, Boolean(data.isArchived));
+      try {
+        sessionStorage.setItem('remov_active_ticket_id', data.registration.id);
+      } catch {
+        // Ignore sessionStorage errors
+      }
       setConfirmedRegistration(data.registration);
       setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
       setCurrentStep(5);
@@ -191,6 +196,31 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       setLoadingSavedRegId(null);
     }
   };
+
+  // Restore last viewed/submitted ticket in this session so confirmation never vanishes on refresh
+  useEffect(() => {
+    if (typeof window === 'undefined' || confirmedRegistration) return;
+    let activeId = '';
+    try {
+      activeId = sessionStorage.getItem('remov_active_ticket_id') || '';
+    } catch {
+      activeId = '';
+    }
+    if (!activeId) return;
+    fetch(`/api/registrations/${encodeURIComponent(activeId)}?_t=${Date.now()}`, { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.success && data.registration) {
+          setConfirmedRegistration(data.registration);
+          setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
+          persistRegistrationRef(data.registration, Boolean(data.isArchived));
+          setCurrentStep(5);
+        }
+      })
+      .catch(() => {
+        // Non-blocking restore
+      });
+  }, []);
 
   const availableVaccines = vaccines.filter(v => v.active !== false);
 
@@ -565,6 +595,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       setConfirmedArchiveInfo(null);
       setMatchedLookupRegs([]);
       persistRegistrationRef(data.registration, false);
+      try {
+        sessionStorage.setItem('remov_active_ticket_id', data.registration.id);
+      } catch {
+        // Ignore sessionStorage errors
+      }
       setHoldId(null);
       setHoldExpiresAt(null);
       setCurrentStep(5);
@@ -611,6 +646,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       }
       setConfirmedRegistration(data.registration);
       setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
+      try {
+        sessionStorage.setItem('remov_active_ticket_id', data.registration.id);
+      } catch {
+        // Ignore sessionStorage errors
+      }
       if (Array.isArray(data.matches) && data.matches.length > 0) {
         setMatchedLookupRegs(data.matches);
         data.matches.forEach((m: any) => {
@@ -641,6 +681,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   };
 
   const resetForNewPet = () => {
+    try {
+      sessionStorage.removeItem('remov_active_ticket_id');
+    } catch {
+      // Ignore sessionStorage errors
+    }
     setPetName('');
     setPetBreed('');
     setPetAge('');
@@ -1071,7 +1116,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
           )}
 
           {/* ================= STEP 1: DATA PAWRENT ================= */}
-          {currentStep === 1 && (
+          {currentStep === 1 && event.eventStatus !== 'completed' && (
             <div className="space-y-6">
               <div className="border-b border-stone-100 pb-4">
                 <div className="flex items-center gap-2 text-[#141414] mb-1">
@@ -1204,7 +1249,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
           )}
 
           {/* ================= STEP 2: DATA ANABUL & EDITABLE HEALTH CHECKLIST ================= */}
-          {currentStep === 2 && (
+          {currentStep === 2 && event.eventStatus !== 'completed' && (
             <div className="space-y-6">
               <div className="border-b border-stone-100 pb-4">
                 <div className="flex items-center gap-2 text-[#141414] mb-1">
@@ -1471,7 +1516,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
           )}
 
           {/* ================= STEP 3: PILIH VAKSIN & KLOTER (TANPA REKOMENDASI PRODUK) ================= */}
-          {currentStep === 3 && (
+          {currentStep === 3 && event.eventStatus !== 'completed' && (
             <div className="space-y-6">
               <div className="border-b border-stone-100 pb-4">
                 <div className="flex items-center justify-between gap-2">
@@ -1852,8 +1897,8 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
             </div>
           )}
 
-          {/* ================= STEP 4: KUNCI KUOTA & PAYMENT PROOF (AUTO-VERIFIED) ================= */}
-          {currentStep === 4 && (
+          {/* ================= STEP 4: KUNCI KUOTA & KONFIRMASI ONSITE ================= */}
+          {currentStep === 4 && event.eventStatus !== 'completed' && (
             <div className="space-y-6">
               {/* Hold / Non-Vaccine Banner */}
               {holdId ? (
@@ -2327,6 +2372,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                       type="button"
                       onClick={() => {
                         if (event.eventStatus === 'completed') {
+                          try {
+                            sessionStorage.removeItem('remov_active_ticket_id');
+                          } catch {
+                            // Ignore sessionStorage errors
+                          }
                           setConfirmedRegistration(null);
                           setConfirmedArchiveInfo(null);
                           setCurrentStep(1);

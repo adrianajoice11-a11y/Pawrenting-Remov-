@@ -5,6 +5,11 @@ import {
   Pie,
   Cell,
   Tooltip,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
 } from 'recharts';
 import {
   Database,
@@ -22,6 +27,11 @@ import {
   Cat,
   Dog,
   Settings,
+  Calendar,
+  Download,
+  ChevronDown,
+  ChevronUp,
+  TrendingUp,
 } from 'lucide-react';
 import type {
   Registration,
@@ -29,6 +39,7 @@ import type {
   SheetSyncAuditEntry,
   SheetSyncLiveState,
   SheetSyncAction,
+  DailyRegistrationSnapshot,
 } from '../types.ts';
 
 const PET_COLORS = {
@@ -270,6 +281,379 @@ export const PetDistributionDonutCard: React.FC<PetDistributionDonutCardProps> =
                   />
                 )}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+interface DailyRegistrationTrendCardProps {
+  dailySnapshots: DailyRegistrationSnapshot[];
+  todayDateKey: string;
+  todayDateLabel: string;
+  yesterdayRegistrations?: number;
+  lastUpdatedAt?: string;
+  eventStatus?: 'active' | 'completed';
+  eventDate?: string;
+  onSelectDateFilter?: (dateKey: string) => void;
+}
+
+export const DailyRegistrationTrendCard: React.FC<DailyRegistrationTrendCardProps> = ({
+  dailySnapshots,
+  todayDateKey,
+  todayDateLabel,
+  yesterdayRegistrations = 0,
+  lastUpdatedAt,
+  eventStatus = 'active',
+  eventDate,
+  onSelectDateFilter,
+}) => {
+  const [expandedDates, setExpandedDates] = useState<Record<string, boolean>>({});
+  const [chartMode, setChartMode] = useState<'daily' | 'both'>('daily');
+
+  const summary = useMemo(() => {
+    const sortedAsc = [...dailySnapshots].sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+    const sortedDesc = [...sortedAsc].reverse();
+    const totalCollected = sortedAsc.length > 0 ? sortedAsc[sortedAsc.length - 1].cumulativeCount : 0;
+    const todaySnap = sortedAsc.find((s) => s.dateKey === todayDateKey);
+    const todayCount = todaySnap?.newCount ?? 0;
+    const activeDays = sortedAsc.length;
+    const avgPerDay = activeDays > 0 ? (totalCollected / activeDays).toFixed(1) : '0';
+    const deltaVsYesterday = todayCount - yesterdayRegistrations;
+
+    const chartData = sortedAsc.map((snap) => ({
+      dateKey: snap.dateKey,
+      label: snap.dateKey === todayDateKey ? 'Hari Ini' : snap.dateLabel,
+      fullLabel: snap.dateLabel,
+      newCount: snap.newCount,
+      cumulativeCount: snap.cumulativeCount,
+    }));
+
+    return {
+      sortedDesc,
+      totalCollected,
+      todayCount,
+      activeDays,
+      avgPerDay,
+      deltaVsYesterday,
+      chartData,
+    };
+  }, [dailySnapshots, todayDateKey, yesterdayRegistrations]);
+
+  const toggleExpandDay = (dateKey: string) => {
+    setExpandedDates((prev) => ({ ...prev, [dateKey]: !prev[dateKey] }));
+  };
+
+  const isCompleted = eventStatus === 'completed';
+
+  const growthStatusText =
+    summary.todayCount > 0
+      ? `Bertambah +${summary.todayCount} peserta baru hari ini (${summary.deltaVsYesterday >= 0 ? `+${summary.deltaVsYesterday}` : summary.deltaVsYesterday} dibanding kemarin)`
+      : summary.totalCollected > 0
+      ? `Belum ada tambahan baru hari ini · ${summary.totalCollected} peserta tersimpan permanen`
+      : 'Menunggu pendaftaran pertama';
+
+  return (
+    <div className="bg-white rounded-3xl p-6 border border-stone-200 space-y-5">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-stone-100 pb-4">
+        <div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500 mb-1">
+            <span className={isCompleted ? 'font-bold text-[#16A34A]' : 'font-bold text-[#141414]'}>
+              {isCompleted ? 'Finalisasi Event · Statistik Terkunci' : 'Pembaruan Harian Aktif s/d Acara Selesai'}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span className={summary.todayCount > 0 ? 'font-bold text-[#16A34A]' : 'text-stone-600'}>
+              {growthStatusText}
+            </span>
+            {eventDate && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>Jadwal Acara: {eventDate}</span>
+              </>
+            )}
+          </div>
+          <h2 className="font-heading font-bold text-lg text-[#141414] flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-[#141414]" />
+            <span>Tren Laju Pendaftar Per Hari &amp; Rekap Peserta</span>
+          </h2>
+          <p className="text-xs text-stone-500 mt-0.5">
+            Panitia dapat memantau laju penambahan peserta per hari menjelang hari-H dan memastikan seluruh pendaftar tetap tersimpan aman setiap hari.
+          </p>
+        </div>
+
+        <a
+          href="/api/admin/daily-recap.csv"
+          className="inline-flex items-center gap-1.5 bg-white hover:bg-stone-100 text-[#141414] border border-stone-300 text-xs font-bold px-3.5 py-2 rounded-xl transition-colors whitespace-nowrap shrink-0"
+        >
+          <Download className="w-3.5 h-3.5" />
+          <span>Unduh Rekap Harian (.csv)</span>
+        </a>
+      </div>
+
+      {/* 4-Column Metric Strip */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 border border-stone-200 rounded-2xl divide-y sm:divide-y-0 sm:divide-x divide-stone-200 bg-stone-50/50">
+        <div className="p-4">
+          <span className="text-[11px] font-bold text-stone-500 block">Pertambahan Hari Ini</span>
+          <strong className={`font-heading font-black text-2xl tabular-nums block mt-0.5 ${summary.todayCount > 0 ? 'text-[#16A34A]' : 'text-[#141414]'}`}>
+            +{summary.todayCount}
+          </strong>
+          <span className="text-[11px] text-stone-500 tabular-nums block mt-0.5">
+            {todayDateLabel} · Kemarin: +{yesterdayRegistrations}
+          </span>
+        </div>
+
+        <div className="p-4">
+          <span className="text-[11px] font-bold text-stone-500 block">Total Terkumpul</span>
+          <strong className="font-heading font-black text-2xl text-[#16A34A] tabular-nums block mt-0.5">
+            {summary.totalCollected}
+          </strong>
+          <span className="text-[11px] text-stone-500 block mt-0.5">
+            {isCompleted ? 'Total final acara selesai' : 'Data peserta tersimpan utuh'}
+          </span>
+        </div>
+
+        <div className="p-4">
+          <span className="text-[11px] font-bold text-stone-500 block">Hari Pengumpulan</span>
+          <strong className="font-heading font-black text-2xl text-[#141414] tabular-nums block mt-0.5">
+            {summary.activeDays} Hari
+          </strong>
+          <span className="text-[11px] text-stone-500 tabular-nums block mt-0.5">
+            Rata-rata {summary.avgPerDay} peserta/hari
+          </span>
+        </div>
+
+        <div className="p-4">
+          <span className="text-[11px] font-bold text-stone-500 block">Terakhir Diperbarui</span>
+          <strong className="font-mono font-bold text-xs sm:text-sm text-[#141414] tabular-nums block mt-1.5">
+            {formatTimestampShort(lastUpdatedAt)}
+          </strong>
+          <span className="text-[11px] text-stone-500 block mt-0.5">
+            {isCompleted ? 'Tersimpan di arsip jadwal' : 'Backup harian aktif otomatis'}
+          </span>
+        </div>
+      </div>
+
+      {/* Line Chart + Daily Participant Log */}
+      {summary.sortedDesc.length === 0 ? (
+        <div className="py-10 px-4 text-center border border-dashed border-stone-200 rounded-2xl bg-stone-50/60">
+          <Calendar className="w-6 h-6 text-stone-400 mx-auto mb-2" />
+          <p className="text-sm font-bold text-[#141414]">Belum ada riwayat pendaftaran harian</p>
+          <p className="text-xs text-stone-500 mt-1 max-w-md mx-auto">
+            Saat peserta mengisi formulir dari hari ke hari menjelang acara, grafik garis tren harian dan daftar nama per tanggal akan langsung muncul dan tersimpan otomatis di sini.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+          {/* Recharts Line Chart: Daily Pace & Optional Cumulative */}
+          <div className="lg:col-span-6 border border-stone-200 rounded-2xl p-4 flex flex-col justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+              <div>
+                <h3 className="font-heading font-bold text-sm text-[#141414]">
+                  Grafik Tren Jumlah Pendaftar Per Hari
+                </h3>
+                <p className="text-[11px] text-stone-500">
+                  {chartMode === 'daily'
+                    ? 'Garis hitam = jumlah pendaftar baru per tanggal'
+                    : 'Garis hitam = harian · Garis amber = akumulasi total'}
+                </p>
+              </div>
+
+              <div className="inline-flex items-center bg-stone-100 p-1 rounded-xl border border-stone-200 self-start sm:self-auto shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setChartMode('daily')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                    chartMode === 'daily'
+                      ? 'bg-white text-[#141414] border border-stone-200'
+                      : 'text-stone-600 hover:text-[#141414]'
+                  }`}
+                >
+                  Laju Per Hari
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChartMode('both')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                    chartMode === 'both'
+                      ? 'bg-white text-[#141414] border border-stone-200'
+                      : 'text-stone-600 hover:text-[#141414]'
+                  }`}
+                >
+                  + Akumulasi
+                </button>
+              </div>
+            </div>
+
+            <div className="h-[240px] w-full">
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={summary.chartData} margin={{ top: 10, right: 14, left: -16, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" vertical={false} />
+                  <XAxis
+                    dataKey="label"
+                    tick={{ fontSize: 11, fill: '#57534e' }}
+                    axisLine={{ stroke: '#d6d3d1' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    allowDecimals={false}
+                    tick={{ fontSize: 11, fill: '#57534e' }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <Tooltip
+                    formatter={(value: unknown, name: unknown) => [
+                      `${Number(value)} Peserta`,
+                      name === 'newCount' ? 'Pendaftar Baru Hari Ini' : 'Akumulasi Total',
+                    ]}
+                    labelFormatter={(_, payload) => {
+                      const item = payload?.[0]?.payload;
+                      return item ? `Tanggal: ${item.fullLabel} (${item.dateKey})` : '';
+                    }}
+                    contentStyle={{
+                      borderRadius: '12px',
+                      border: '1px solid #e7e5e4',
+                      fontSize: '12px',
+                      color: '#141414',
+                      boxShadow: 'none',
+                    }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="newCount"
+                    name="newCount"
+                    stroke="#141414"
+                    strokeWidth={3}
+                    dot={{ r: 5, fill: '#fff000', stroke: '#141414', strokeWidth: 2 }}
+                    activeDot={{ r: 7, fill: '#141414', stroke: '#fff000', strokeWidth: 2 }}
+                    isAnimationActive={false}
+                  />
+                  {chartMode === 'both' && (
+                    <Line
+                      type="monotone"
+                      dataKey="cumulativeCount"
+                      name="cumulativeCount"
+                      stroke="#D97706"
+                      strokeWidth={2.5}
+                      strokeDasharray="5 4"
+                      dot={{ r: 4, fill: '#D97706', stroke: '#ffffff', strokeWidth: 1.5 }}
+                      activeDot={{ r: 6 }}
+                      isAnimationActive={false}
+                    />
+                  )}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Daily Participant Log Table */}
+          <div className="lg:col-span-6 border border-stone-200 rounded-2xl overflow-hidden flex flex-col">
+            <div className="px-4 py-3 bg-stone-50 border-b border-stone-200 flex items-center justify-between gap-2">
+              <h3 className="font-heading font-bold text-sm text-[#141414]">
+                Daftar Siapa Saja yang Mendaftar Per Hari
+              </h3>
+              <span className="font-mono text-[11px] font-bold text-stone-600 tabular-nums">
+                {summary.sortedDesc.length} Tanggal
+              </span>
+            </div>
+
+            <div className="divide-y divide-stone-100 max-h-[280px] overflow-y-auto">
+              {summary.sortedDesc.map((snap) => {
+                const isToday = snap.dateKey === todayDateKey;
+                const isExpanded = !!expandedDates[snap.dateKey];
+                const visibleParticipants = isExpanded
+                  ? snap.participants
+                  : snap.participants.slice(0, 3);
+                const hiddenCount = Math.max(0, snap.participants.length - visibleParticipants.length);
+
+                return (
+                  <div key={snap.dateKey} className="p-3.5 bg-white hover:bg-stone-50/70 transition-colors space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 text-xs min-w-0">
+                        <strong className="font-heading text-[#141414] whitespace-nowrap">
+                          {snap.dateLabel}
+                        </strong>
+                        {isToday && (
+                          <span className="text-[11px] font-bold text-[#16A34A] whitespace-nowrap">
+                            · Hari Ini
+                          </span>
+                        )}
+                        <span className="text-[11px] text-stone-400 font-mono tabular-nums">
+                          ({snap.dateKey})
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2 text-[11px] tabular-nums shrink-0">
+                        <span className="font-mono font-bold text-[#141414]">
+                          +{snap.newCount} baru
+                        </span>
+                        <span className="text-stone-300" aria-hidden="true">·</span>
+                        <span className="font-mono text-stone-600">
+                          Total: {snap.cumulativeCount}
+                        </span>
+                        {onSelectDateFilter && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectDateFilter(snap.dateKey)}
+                            className="text-[11px] font-bold text-[#141414] bg-stone-100 hover:bg-[#fff000] border border-stone-300 hover:border-[#141414] px-2 py-0.5 rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+                          >
+                            Lihat Tabel
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="text-[11px] text-stone-500 tabular-nums">
+                      {snap.catCount} Kucing · {snap.dogCount} Anjing · {snap.checkedInCount} Hadir Booth
+                    </div>
+
+                    <div className="space-y-1 pt-0.5">
+                      {visibleParticipants.map((p) => (
+                        <div
+                          key={p.id}
+                          className="flex items-center justify-between gap-2 text-xs text-stone-700 py-0.5"
+                        >
+                          <div className="truncate min-w-0">
+                            <span className="font-mono font-bold text-[#141414] mr-1.5">
+                              #{p.queueNumber || '--'}
+                            </span>
+                            <span className="font-semibold text-[#141414]">{p.ownerName}</span>
+                            <span className="text-stone-400 mx-1">·</span>
+                            <span>
+                              {p.petName} ({p.petType === 'kucing' ? 'Kucing' : 'Anjing'})
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-stone-500 truncate max-w-[140px] shrink-0">
+                            {p.vaccineName}
+                          </span>
+                        </div>
+                      ))}
+
+                      {(hiddenCount > 0 || isExpanded) && snap.participants.length > 3 && (
+                        <button
+                          type="button"
+                          onClick={() => toggleExpandDay(snap.dateKey)}
+                          className="inline-flex items-center gap-1 text-[11px] font-bold text-[#141414] hover:underline pt-1 cursor-pointer"
+                        >
+                          {isExpanded ? (
+                            <>
+                              <ChevronUp className="w-3.5 h-3.5" />
+                              <span>Tampilkan lebih ringkas</span>
+                            </>
+                          ) : (
+                            <>
+                              <ChevronDown className="w-3.5 h-3.5" />
+                              <span>+{hiddenCount} peserta lainnya di tanggal ini</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

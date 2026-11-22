@@ -11,7 +11,7 @@ import {
 import type {
   EventConfig, VaccineOption, Registration, QuotaHold,
   GoogleSheetConfig, BankAccount, Voucher, EventArchive, CheckInStatus, HealthChecklistItem,
-  SheetSyncAuditEntry, SheetSyncLiveState
+  SheetSyncAuditEntry, SheetSyncLiveState, DailyRegistrationSnapshot
 } from '../types.ts';
 import { GOOGLE_APPS_SCRIPT_CODE } from '../utils/sheetScriptTemplate.ts';
 import {
@@ -21,6 +21,7 @@ import {
 } from '../utils/csvExport.ts';
 import {
   PetDistributionDonutCard,
+  DailyRegistrationTrendCard,
   RealtimeSheetSyncVisualizer,
   SheetAuditLogPanel,
 } from './AdminAnalyticsAndSyncPanel.tsx';
@@ -58,6 +59,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     event: EventConfig;
     vaccines: VaccineOption[];
     registrations: Registration[];
+    dailySnapshots?: DailyRegistrationSnapshot[];
     holds: QuotaHold[];
     vouchers: Voucher[];
     archives: EventArchive[];
@@ -78,6 +80,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [checkInFilter, setCheckInFilter] = useState<'all' | CheckInStatus>('all');
   const [vaccineFilter, setVaccineFilter] = useState<string>('all');
   const [petTypeFilter, setPetTypeFilter] = useState<'all' | 'kucing' | 'anjing'>('all');
+  const [registrationDateFilter, setRegistrationDateFilter] = useState<string>('all');
   const [previewPhotoUrl, setPreviewPhotoUrl] = useState<string | null>(null);
   const [selectedRegDetails, setSelectedRegDetails] = useState<Registration | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<{ reg: Registration; newSession: string } | null>(null);
@@ -971,6 +974,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     );
   }
 
+  const getRegDateKeyWib = (iso?: string) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Jakarta',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    } catch {
+      return d.toISOString().slice(0, 10);
+    }
+  };
+
   const filteredRegistrations = adminData.registrations.filter((r) => {
     const q = searchTerm.toLowerCase();
     const matchSearch =
@@ -986,8 +1005,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const matchCheckIn = checkInFilter === 'all' || (r.checkInStatus || 'belum_hadir') === checkInFilter;
     const matchVaccine = vaccineFilter === 'all' || r.vaccineId === vaccineFilter;
     const matchPetType = petTypeFilter === 'all' || r.petType === petTypeFilter;
+    const matchRegDate = registrationDateFilter === 'all' || getRegDateKeyWib(r.createdAt) === registrationDateFilter;
 
-    return matchSearch && matchStatus && matchCheckIn && matchVaccine && matchPetType;
+    return matchSearch && matchStatus && matchCheckIn && matchVaccine && matchPetType && matchRegDate;
   });
 
   const paymentProofRegistrations = adminData.registrations.filter((r) => {
@@ -1110,9 +1130,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
             <div className="bg-white p-5 rounded-3xl border border-stone-200 shadow-xs">
               <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Total Pendaftar</span>
-              <span className="font-heading font-black text-3xl text-[#141414]">{adminData.stats.totalRegistrations}</span>
-              <span className="text-[11px] text-emerald-700 font-bold block mt-1">
-                {adminData.stats.verifiedCount} Sukses Booking
+              <span className="font-heading font-black text-3xl text-[#141414] tabular-nums">{adminData.stats.totalRegistrations}</span>
+              <span className="text-[11px] text-emerald-700 font-bold block mt-1 tabular-nums">
+                {adminData.stats.verifiedCount} Sukses · +{adminData.stats.todayRegistrations ?? 0} Hari Ini
               </span>
             </div>
 
@@ -1348,6 +1368,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             )}
           </div>
 
+          {/* Daily Registration Trend & Per-Day Participant Log */}
+          <DailyRegistrationTrendCard
+            dailySnapshots={adminData.dailySnapshots || []}
+            todayDateKey={adminData.stats.todayDateKey || new Date().toISOString().slice(0, 10)}
+            todayDateLabel={adminData.stats.todayDateLabel || 'Hari Ini'}
+            yesterdayRegistrations={adminData.stats.yesterdayRegistrations ?? 0}
+            lastUpdatedAt={adminData.stats.lastUpdatedAt}
+            eventStatus={adminData.event.eventStatus}
+            eventDate={adminData.event.date}
+            onSelectDateFilter={(dateKey) => {
+              setRegistrationDateFilter(dateKey);
+              setActiveTab('submissions');
+            }}
+          />
+
           {/* Pet Distribution Donut Chart & Vaccine Quota Summary */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
             <div className="lg:col-span-6">
@@ -1504,6 +1539,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <option value="kucing">Kucing ({adminData.stats.catCount ?? 0})</option>
                 <option value="anjing">Anjing ({adminData.stats.dogCount ?? 0})</option>
               </select>
+
+              <select
+                value={registrationDateFilter}
+                onChange={(e) => setRegistrationDateFilter(e.target.value)}
+                className="px-3 py-2.5 rounded-xl border border-stone-200 text-xs font-medium bg-white"
+              >
+                <option value="all">Semua Tanggal Daftar</option>
+                {(adminData.dailySnapshots || [])
+                  .slice()
+                  .reverse()
+                  .map((snap) => (
+                    <option key={snap.dateKey} value={snap.dateKey}>
+                      {snap.dateKey === adminData.stats.todayDateKey ? `Hari Ini (${snap.dateLabel})` : snap.dateLabel} — {snap.newCount} org
+                    </option>
+                  ))}
+              </select>
             </div>
           </div>
 
@@ -1539,7 +1590,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </span>
                             <div>
                               <span className="font-mono font-bold text-[#141414] block">{reg.regNumber}</span>
-                              <span className="text-[10px] text-stone-400 font-mono">{reg.barcodeCode || '-'}</span>
+                              <span className="text-[10px] text-stone-400 font-mono block">{reg.barcodeCode || '-'}</span>
+                              <span className="text-[10px] text-stone-500 font-mono tabular-nums">
+                                Daftar: {new Date(reg.createdAt).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                              </span>
                             </div>
                           </div>
                         </td>

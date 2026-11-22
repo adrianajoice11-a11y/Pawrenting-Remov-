@@ -19,7 +19,10 @@ import type {
   SheetSyncAction,
   SheetSyncAuditEntry,
   SheetSyncQueueJob,
-  SheetSyncLiveState
+  SheetSyncLiveState,
+  DailyParticipantEntry,
+  DailyRegistrationSnapshot,
+  PublicEventStats
 } from './src/types.ts';
 import {
   DEFAULT_COLUMNS as CANONICAL_SPREADSHEET_COLUMNS,
@@ -31,6 +34,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.resolve(__dirname, 'data');
+const DAILY_BACKUP_DIR = path.resolve(DATA_DIR, 'daily-backups');
 const DB_PATH = path.resolve(DATA_DIR, 'db.json');
 const DB_BACKUP_PATH = path.resolve(DATA_DIR, 'db.backup.json');
 const DB_TMP_PATH = path.resolve(DATA_DIR, 'db.tmp.json');
@@ -39,9 +43,12 @@ const PUBLIC_DIR = path.resolve(__dirname, 'public');
 const ASSET_FOLDERS = ['backgrounds', 'logos', 'vouchers', 'archives'] as const;
 type AssetFolder = typeof ASSET_FOLDERS[number];
 
-// Ensure data & public asset directories exist
+// Ensure data, daily-backups & public asset directories exist
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (!fs.existsSync(DAILY_BACKUP_DIR)) {
+  fs.mkdirSync(DAILY_BACKUP_DIR, { recursive: true });
 }
 ASSET_FOLDERS.forEach((folder) => {
   const dir = path.resolve(PUBLIC_DIR, folder);
@@ -475,6 +482,8 @@ function parseDbPayload(parsed: any): AppDatabase {
     archives: Array.isArray(parsed.archives) ? parsed.archives : defaultInitialData.archives,
     sheetConfig: { ...defaultInitialData.sheetConfig, ...(parsed.sheetConfig || {}) },
     sheetAuditLogs: Array.isArray(parsed.sheetAuditLogs) ? parsed.sheetAuditLogs.slice(0, 200) : [],
+    dailySnapshots: computeDailySnapshots(normalizedRegs),
+    lastUpdatedAt: parsed.lastUpdatedAt || new Date().toISOString(),
   };
 }
 
@@ -587,6 +596,7 @@ function buildArchiveRecordFromDb(
     totalRegistrations: db.registrations.length,
     totalAttended: db.registrations.filter(r => r.checkInStatus === 'sudah_hadir' || r.checkInStatus === 'selesai_vaksin').length,
     totalVaccinatedByVaccine: Object.entries(vaccineCounts).map(([vaccineName, count]) => ({ vaccineName, count })),
+    dailySnapshots: computeDailySnapshots(db.registrations),
     registrations: [...db.registrations],
     archivedAt: new Date().toISOString(),
   };
@@ -649,22 +659,173 @@ function matchRegistrationQuery(r: Registration, rawQuery: string): boolean {
   return false;
 }
 
-function writeDb(data: AppDatabase) {
+function getJakartaDateKey(input?: string | number | Date): string {
+  const dateObj = input !== undefined ? new Date(input) : new Date();
+  const safeDate = Number.isNaN(dateObj.getTime()) ? new Date() : dateObj;
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Jakarta',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(safeDate);
+  } catch {
+    return safeDate.toISOString().slice(0, 10);
+  }
+}
+
+function formatIndonesianDateShort(dateKey: string): string {
+  const parts = dateKey.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return dateKey;
+  const [y, m, d] = parts;
+  const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  return dt.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Jakarta',
+  });
+}
+
+function computeDailySnapshots(registrations: Registration[]): DailyRegistrationSnapshot[] {
+  const activeRegs = registrations.filter(
+    (r) => r.paymentStatus !== 'rejected' && r.paymentStatus !== 'expired'
+  );
+  const grouped = new Map<string, Registration[]>();
+
+  for (const reg of activeRegs) {
+    const key = getJakartaDateKey(reg.createdAt);
+    const list = grouped.get(key) || [];
+    list.push(reg);
+    grouped.set(key, list);
+  }
+
+  const sortedKeys = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+  const nowIso = new Date().toISOString();
+  let runningCumulative = 0;
+
+  return sortedKeys.map((dateKey) => {
+    const dayRegs = (grouped.get(dateKey) || []).slice().sort((a, b) => {
+      const ta = new Date(a.createdAt).getTime();
+      const tb = new Date(b.createdAt).getTime();
+      return ta - tb;
+    });
+    runningCumulative += dayRegs.length;
+
+    const participants: DailyParticipantEntry[] = dayRegs.map((r) => ({
+      id: r.id,
+      regNumber: r.regNumber,
+      queueNumber: r.queueNumber,
+      ownerName: r.ownerName,
+      petName: r.petName,
+      petType: r.petType,
+      vaccineName: r.vaccineName,
+      selectedSession: r.selectedSession,
+      checkInStatus: r.checkInStatus || 'belum_hadir',
+      createdAt: r.createdAt,
+    }));
+
+    return {
+      dateKey,
+      dateLabel: formatIndonesianDateShort(dateKey),
+      newCount: dayRegs.length,
+      cumulativeCount: runningCumulative,
+      catCount: dayRegs.filter((r) => r.petType === 'kucing').length,
+      dogCount: dayRegs.filter((r) => r.petType === 'anjing').length,
+      checkedInCount: dayRegs.filter(
+        (r) => r.checkInStatus === 'sudah_hadir' || r.checkInStatus === 'selesai_vaksin'
+      ).length,
+      participants,
+      updatedAt: nowIso,
+    };
+  });
+}
+
+function buildPublicEventStats(db: AppDatabase): PublicEventStats {
+  const todayKey = getJakartaDateKey();
+  const snapshots = computeDailySnapshots(db.registrations);
+  const activeRegs = db.registrations.filter(
+    (r) => r.paymentStatus !== 'rejected' && r.paymentStatus !== 'expired'
+  );
+  const todaySnap = snapshots.find((s) => s.dateKey === todayKey);
+
+  return {
+    totalRegistrations: activeRegs.length,
+    todayRegistrations: todaySnap?.newCount ?? 0,
+    todayDateKey: todayKey,
+    todayDateLabel: formatIndonesianDateShort(todayKey),
+    catCount: activeRegs.filter((r) => r.petType === 'kucing').length,
+    dogCount: activeRegs.filter((r) => r.petType === 'anjing').length,
+    checkedInCount: activeRegs.filter(
+      (r) => r.checkInStatus === 'sudah_hadir' || r.checkInStatus === 'selesai_vaksin'
+    ).length,
+    activeCollectionDays: snapshots.length,
+    dailyTrend: snapshots.map((s) => ({
+      dateKey: s.dateKey,
+      dateLabel: s.dateLabel,
+      newCount: s.newCount,
+      cumulativeCount: s.cumulativeCount,
+    })),
+    lastUpdatedAt: db.lastUpdatedAt || new Date().toISOString(),
+    eventStatus: db.event.eventStatus === 'completed' ? 'completed' : 'active',
+  };
+}
+
+let lastDailyFileSnapshotHash = '';
+
+function persistDailyBackupSnapshot(data: AppDatabase, forceIfMissing = false) {
+  try {
+    const todayKey = getJakartaDateKey();
+    const dailyPath = path.resolve(DAILY_BACKUP_DIR, `${todayKey}.json`);
+    if (forceIfMissing && fs.existsSync(dailyPath)) {
+      return;
+    }
+    const snapshots = computeDailySnapshots(data.registrations);
+    const payload = {
+      dateKey: todayKey,
+      dateLabel: formatIndonesianDateShort(todayKey),
+      eventTitle: data.event.title,
+      eventDate: data.event.date,
+      eventStatus: data.event.eventStatus || 'active',
+      totalRegistrations: data.registrations.length,
+      dailySnapshots: snapshots,
+      registrations: data.registrations,
+      updatedAt: data.lastUpdatedAt || new Date().toISOString(),
+    };
+    const serialized = JSON.stringify(payload, null, 2);
+    const signature = `${todayKey}:${data.registrations.length}:${data.event.eventStatus}:${data.registrations.map(r => `${r.id}:${r.checkInStatus || ''}:${r.selectedSession}:${r.paymentStatus}`).join('|')}`;
+    if (!forceIfMissing && signature === lastDailyFileSnapshotHash && fs.existsSync(dailyPath)) {
+      return;
+    }
+    fs.writeFileSync(dailyPath, serialized, 'utf-8');
+    lastDailyFileSnapshotHash = signature;
+  } catch (err) {
+    console.error('Error writing daily backup snapshot:', err);
+  }
+}
+
+function writeDb(data: AppDatabase, options?: { allowEmptyRegistrations?: boolean }) {
   try {
     syncLinkedCompletedArchive(data);
-    const cleanData: AppDatabase = {
-      ...data,
-      event: sanitizeEventForDisk(data.event),
-      vaccines: sanitizeVaccinesForDisk(data.vaccines),
-    };
-    const serialized = JSON.stringify(cleanData, null, 2);
-    if (!serialized || serialized.length < 10) return;
+    const nowIso = new Date().toISOString();
 
     if (fs.existsSync(DB_PATH)) {
       try {
         const existingRaw = fs.readFileSync(DB_PATH, 'utf-8');
         if (existingRaw && existingRaw.trim().startsWith('{')) {
-          JSON.parse(existingRaw);
+          const existingParsed = JSON.parse(existingRaw);
+          if (
+            Array.isArray(existingParsed?.registrations) &&
+            existingParsed.registrations.length > 0 &&
+            data.registrations.length === 0 &&
+            !options?.allowEmptyRegistrations
+          ) {
+            console.warn('Prevented unintended empty registrations overwrite; preserving existing registrations.');
+            data = {
+              ...data,
+              registrations: existingParsed.registrations,
+            };
+          }
           fs.writeFileSync(DB_BACKUP_PATH, existingRaw, 'utf-8');
         }
       } catch {
@@ -672,8 +833,19 @@ function writeDb(data: AppDatabase) {
       }
     }
 
+    const cleanData: AppDatabase = {
+      ...data,
+      event: sanitizeEventForDisk(data.event),
+      vaccines: sanitizeVaccinesForDisk(data.vaccines),
+      dailySnapshots: computeDailySnapshots(data.registrations),
+      lastUpdatedAt: nowIso,
+    };
+    const serialized = JSON.stringify(cleanData, null, 2);
+    if (!serialized || serialized.length < 10) return;
+
     fs.writeFileSync(DB_TMP_PATH, serialized, 'utf-8');
     fs.renameSync(DB_TMP_PATH, DB_PATH);
+    persistDailyBackupSnapshot(cleanData);
     broadcastDbUpdate('db_saved');
   } catch (err) {
     console.error('Error writing DB:', err);
@@ -1164,6 +1336,8 @@ async function startServer() {
     const db = readDb();
     if (cleanExpiredHoldsAndBookings(db)) {
       writeDb(db);
+    } else if (db.event.eventStatus !== 'completed') {
+      persistDailyBackupSnapshot(db, true);
     }
     const allComputed = computeVaccinesWithQuota(db);
     const activeVaccinesForPublic = allComputed.filter(v => v.active !== false);
@@ -1181,6 +1355,7 @@ async function startServer() {
       success: true,
       event: publicEvent,
       vaccines: activeVaccinesForPublic,
+      publicStats: buildPublicEventStats(db),
       activeHoldsCount: db.holds.length,
       serverTime: Date.now()
     });
@@ -1831,11 +2006,27 @@ async function startServer() {
     const db = readDb();
     if (cleanExpiredHoldsAndBookings(db)) {
       writeDb(db);
+    } else if (db.event.eventStatus !== 'completed') {
+      persistDailyBackupSnapshot(db, true);
     }
     const vaccinesWithQuota = computeVaccinesWithQuota(db);
+    const dailySnapshots = computeDailySnapshots(db.registrations);
+    const todayKey = getJakartaDateKey();
+    const yesterdayKey = getJakartaDateKey(Date.now() - 86400000);
+    const todaySnap = dailySnapshots.find(s => s.dateKey === todayKey);
+    const yesterdaySnap = dailySnapshots.find(s => s.dateKey === yesterdayKey);
+    const todayRegsCount = todaySnap?.newCount ?? 0;
+    const yesterdayRegsCount = yesterdaySnap?.newCount ?? 0;
 
     const stats = {
       totalRegistrations: db.registrations.length,
+      todayRegistrations: todayRegsCount,
+      yesterdayRegistrations: yesterdayRegsCount,
+      deltaVsYesterday: todayRegsCount - yesterdayRegsCount,
+      todayDateKey: todayKey,
+      todayDateLabel: formatIndonesianDateShort(todayKey),
+      activeCollectionDays: dailySnapshots.length,
+      lastUpdatedAt: db.lastUpdatedAt || new Date().toISOString(),
       verifiedCount: db.registrations.filter(r => r.paymentStatus === 'verified').length,
       pendingCount: db.registrations.filter(r => r.paymentStatus === 'pending' || r.paymentStatus === 'pending_payment').length,
       expiredCount: db.registrations.filter(r => r.paymentStatus === 'expired').length,
@@ -1864,6 +2055,7 @@ async function startServer() {
       },
       vaccines: vaccinesWithQuota,
       registrations: db.registrations,
+      dailySnapshots,
       holds: db.holds,
       vouchers: db.vouchers,
       archives: db.archives,
@@ -2078,7 +2270,7 @@ async function startServer() {
     db.registrations = db.registrations.filter(r => r.id !== id);
 
     if (db.registrations.length !== initialLen) {
-      writeDb(db);
+      writeDb(db, { allowEmptyRegistrations: true });
     }
 
     res.json({ success: true, message: 'Data pendaftaran dihapus. Kuota otomatis kembali tersedia.' });
@@ -2384,7 +2576,7 @@ async function startServer() {
     if (nextTimeRange) db.event.timeRange = nextTimeRange;
     if (nextLocationName) db.event.locationName = nextLocationName;
 
-    writeDb(db);
+    writeDb(db, { allowEmptyRegistrations: resetRegistrations !== false });
     res.json({
       success: true,
       archive: newArchive,
@@ -2636,9 +2828,49 @@ async function startServer() {
     res.send(csvContent);
   });
 
+  // 17d. ADMIN: Download Daily Registration Recap CSV (GET /api/admin/daily-recap.csv)
+  app.get('/api/admin/daily-recap.csv', (req, res) => {
+    const db = readDb();
+    const snapshots = computeDailySnapshots(db.registrations);
+    const esc = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const headers = [
+      'Tanggal (WIB)',
+      'Label Tanggal',
+      'Pendaftar Baru Hari Ini',
+      'Akumulasi Total Peserta',
+      'Kucing',
+      'Anjing',
+      'Sudah Hadir Booth',
+      'Daftar Peserta (Antrian - Pemilik - Anabul - Layanan)'
+    ];
+    const rows = snapshots.map((snap) => {
+      const namesList = snap.participants
+        .map((p) => `#${p.queueNumber || '--'} ${p.ownerName} (${p.petName} · ${p.vaccineName})`)
+        .join('; ');
+      return [
+        esc(snap.dateKey),
+        esc(snap.dateLabel),
+        esc(snap.newCount),
+        esc(snap.cumulativeCount),
+        esc(snap.catCount),
+        esc(snap.dogCount),
+        esc(snap.checkedInCount),
+        esc(namesList),
+      ].join(',');
+    });
+    const csv = '\uFEFF' + [headers.map(esc).join(','), ...rows].join('\r\n');
+    const safeTitle = (db.event.title || 'Pawrenting_REMOV').replace(/[^a-zA-Z0-9]+/g, '_');
+    const todayKey = getJakartaDateKey();
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_Rekap_Harian_${todayKey}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(csv);
+  });
+
   // 18. ADMIN: Reset / Restore Demo Data (POST /api/admin/reset-demo)
   app.post('/api/admin/reset-demo', (req, res) => {
-    writeDb(defaultInitialData);
+    writeDb(defaultInitialData, { allowEmptyRegistrations: true });
     res.json({ success: true, message: 'Data berhasil direset ke pengaturan awal.' });
   });
 
@@ -2661,7 +2893,7 @@ async function startServer() {
         middlewareMode: true,
         hmr: !isHmrDisabled,
         ws: isHmrDisabled ? false : { server: httpServer },
-        watch: isHmrDisabled ? null : {},
+        watch: isHmrDisabled ? null : { ignored: ['**/data/**'] },
       },
       appType: 'spa',
     });

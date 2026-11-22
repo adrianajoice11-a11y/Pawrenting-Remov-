@@ -157,6 +157,50 @@ export interface Voucher {
   redeemedNotes?: string;
 }
 
+export interface DailyParticipantEntry {
+  id: string;
+  regNumber: string;
+  queueNumber?: string;
+  ownerName: string;
+  petName: string;
+  petType: PetType;
+  vaccineName: string;
+  selectedSession: string;
+  checkInStatus?: CheckInStatus;
+  createdAt: string;
+}
+
+export interface DailyRegistrationSnapshot {
+  dateKey: string; // YYYY-MM-DD (Asia/Jakarta WIB)
+  dateLabel: string; // e.g. "22 Nov 2026"
+  newCount: number;
+  cumulativeCount: number;
+  catCount: number;
+  dogCount: number;
+  checkedInCount: number;
+  participants: DailyParticipantEntry[];
+  updatedAt: string;
+}
+
+export interface PublicEventStats {
+  totalRegistrations: number;
+  todayRegistrations: number;
+  todayDateKey: string;
+  todayDateLabel: string;
+  catCount: number;
+  dogCount: number;
+  checkedInCount: number;
+  activeCollectionDays: number;
+  dailyTrend: {
+    dateKey: string;
+    dateLabel: string;
+    newCount: number;
+    cumulativeCount: number;
+  }[];
+  lastUpdatedAt: string;
+  eventStatus: 'active' | 'completed';
+}
+
 export interface EventArchive {
   id: string;
   eventTitle: string;
@@ -179,6 +223,7 @@ export interface EventArchive {
   totalRegistrations: number;
   totalAttended: number;
   totalVaccinatedByVaccine: { vaccineName: string; count: number }[];
+  dailySnapshots?: DailyRegistrationSnapshot[];
   registrations: Registration[];
   archivedAt: string;
 }
@@ -314,5 +359,7 @@ export interface AppDatabase {
   archives: EventArchive[];
   sheetConfig: GoogleSheetConfig;
   sheetAuditLogs?: SheetSyncAuditEntry[];
+  dailySnapshots?: DailyRegistrationSnapshot[];
+  lastUpdatedAt?: string;
 }
 
