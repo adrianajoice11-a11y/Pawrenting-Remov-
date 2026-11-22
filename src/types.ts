@@ -240,6 +240,63 @@ export interface EventConfig {
   lastArchivedId?: string;
 }
 
+export type SheetSyncAction =
+  | 'NEW_REGISTRATION'
+  | 'UPDATE_STATUS'
+  | 'CHECK_IN_UPDATE'
+  | 'SYNC_ALL_REGISTRATIONS'
+  | 'SYNC_PENDING_BATCH'
+  | 'EVENT_COMPLETED_FINAL_SYNC'
+  | 'TEST_CONNECTION';
+
+export type SheetSyncJobStatus = 'queued' | 'pushing' | 'retrying' | 'success' | 'failed';
+
+export interface SheetSyncAuditEntry {
+  id: string;
+  action: SheetSyncAction;
+  status: 'success' | 'failed';
+  targetLabel: string;
+  regId?: string;
+  regNumber?: string;
+  recordCount: number;
+  attempts: number;
+  durationMs: number;
+  message: string;
+  webhookConfigured: boolean;
+  createdAt: string;
+  completedAt: string;
+}
+
+export interface SheetSyncQueueJob {
+  jobId: string;
+  action: SheetSyncAction;
+  targetLabel: string;
+  regId?: string;
+  regNumber?: string;
+  recordCount: number;
+  status: SheetSyncJobStatus;
+  attempt: number;
+  maxAttempts: number;
+  queuedAt: string;
+  startedAt?: string;
+  lastError?: string;
+}
+
+export interface SheetSyncLiveState {
+  pipelineStatus: 'idle' | 'pushing' | 'retrying' | 'unconfigured';
+  webhookConfigured: boolean;
+  autoSync: boolean;
+  activeJob: SheetSyncQueueJob | null;
+  queuedJobs: SheetSyncQueueJob[];
+  pendingQueueCount: number;
+  syncedRegistrationsCount: number;
+  unsyncedRegistrationsCount: number;
+  totalRegistrationsCount: number;
+  sessionCompletedCount: number;
+  sessionFailedCount: number;
+  lastTransitionAt: string;
+}
+
 export interface GoogleSheetConfig {
   webhookUrl: string;
   autoSync: boolean;
@@ -256,4 +313,6 @@ export interface AppDatabase {
   vouchers: Voucher[];
   archives: EventArchive[];
   sheetConfig: GoogleSheetConfig;
+  sheetAuditLogs?: SheetSyncAuditEntry[];
 }
+

@@ -10,10 +10,20 @@ import {
 } from 'lucide-react';
 import type {
   EventConfig, VaccineOption, Registration, QuotaHold,
-  GoogleSheetConfig, BankAccount, Voucher, EventArchive, CheckInStatus, HealthChecklistItem
+  GoogleSheetConfig, BankAccount, Voucher, EventArchive, CheckInStatus, HealthChecklistItem,
+  SheetSyncAuditEntry, SheetSyncLiveState
 } from '../types.ts';
 import { GOOGLE_APPS_SCRIPT_CODE } from '../utils/sheetScriptTemplate.ts';
-import { exportRegistrationsToCSV, exportGroupedSpreadsheetXLS } from '../utils/csvExport.ts';
+import {
+  exportRegistrationsToCSV,
+  exportGroupedSpreadsheetXLS,
+  syncColumnsToCanonicalDatabaseOrder,
+} from '../utils/csvExport.ts';
+import {
+  PetDistributionDonutCard,
+  RealtimeSheetSyncVisualizer,
+  SheetAuditLogPanel,
+} from './AdminAnalyticsAndSyncPanel.tsx';
 
 interface AdminDashboardProps {
   onBackToPublic: () => void;
@@ -52,6 +62,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     vouchers: Voucher[];
     archives: EventArchive[];
     sheetConfig: GoogleSheetConfig;
+    sheetAuditLogs?: SheetSyncAuditEntry[];
+    sheetSyncState?: SheetSyncLiveState;
     stats: any;
   } | null>(null);
 
@@ -65,7 +77,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending_payment' | 'verified' | 'expired' | 'rejected'>('all');
   const [checkInFilter, setCheckInFilter] = useState<'all' | CheckInStatus>('all');
   const [vaccineFilter, setVaccineFilter] = useState<string>('all');
-  const [selectedProofUrl, setSelectedProofUrl] = useState<string | null>(null);
+  const [petTypeFilter, setPetTypeFilter] = useState<'all' | 'kucing' | 'anjing'>('all');
+  const [previewPhotoUrl, setPreviewPhotoUrl] = useState<string | null>(null);
   const [selectedRegDetails, setSelectedRegDetails] = useState<Registration | null>(null);
   const [rescheduleTarget, setRescheduleTarget] = useState<{ reg: Registration; newSession: string } | null>(null);
 
@@ -92,6 +105,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [sheetAutoSync, setSheetAutoSync] = useState(true);
   const [isTestingSheet, setIsTestingSheet] = useState(false);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [isSyncingPending, setIsSyncingPending] = useState(false);
   const [sheetFeedback, setSheetFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
 
@@ -223,7 +237,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         }));
       }
     } catch (err) {
-      console.error('Error fetching admin data:', err);
+      if (!silent) {
+        console.warn('Error fetching admin data:', err);
+      }
     } finally {
       if (!silent) setIsLoading(false);
     }
@@ -233,20 +249,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     fetchAdminData(false);
     fetchFolders();
 
-    let evtSource: EventSource | null = null;
-    if (typeof EventSource !== 'undefined') {
-      evtSource = new EventSource('/api/events/stream');
-      evtSource.onmessage = (msg) => {
-        try {
-          const parsed = JSON.parse(msg.data);
-          if (parsed?.type === 'update') {
-            fetchAdminData(true);
-          }
-        } catch {
-          // Ignore heartbeat
-        }
-      };
-    }
+    const handleServerUpdate = () => {
+      fetchAdminData(true);
+    };
+    window.addEventListener('remov:server-update', handleServerUpdate);
 
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
@@ -255,16 +261,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
 
     const pollTimer = setInterval(() => {
-      fetchAdminData(true);
+      if (document.visibilityState === 'visible') {
+        fetchAdminData(true);
+      }
     }, 8000);
 
     return () => {
       clearInterval(pollTimer);
-      evtSource?.close();
+      window.removeEventListener('remov:server-update', handleServerUpdate);
       bc?.close();
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
   }, []);
+
+  // Faster live polling while Google Sheets sync pipeline is actively pushing or retrying
+  const livePipelineStatus = adminData?.sheetSyncState?.pipelineStatus;
+  useEffect(() => {
+    if (livePipelineStatus !== 'pushing' && livePipelineStatus !== 'retrying') return;
+    const fastTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchAdminData(true);
+      }
+    }, 1500);
+    return () => clearInterval(fastTimer);
+  }, [livePipelineStatus]);
 
   // Upload asset into folder (/backgrounds, /logos, /vouchers, /archives)
   const handleUploadAssetToFolder = async (
@@ -837,6 +857,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleSyncPendingRegistrations = async () => {
+    setIsSyncingPending(true);
+    setSheetFeedback(null);
+    try {
+      const res = await fetch('/api/admin/sheet-sync-pending', { method: 'POST' });
+      const data = await res.json();
+      setSheetFeedback({
+        type: data.success ? 'success' : 'error',
+        message: data.success
+          ? (data.syncedCount > 0
+              ? `Berhasil mendorong ${data.syncedCount} data tertunda ke Google Sheets!`
+              : data.message)
+          : (data.message || 'Gagal sinkronisasi data tertunda.')
+      });
+      fetchAdminData(true);
+    } catch (err: any) {
+      setSheetFeedback({ type: 'error', message: err.message || 'Koneksi gagal' });
+    } finally {
+      setIsSyncingPending(false);
+    }
+  };
+
   const flushEventFormToServer = async (targetForm: EventConfig, showBanner = true) => {
     const { queueCounter: _q, publicShareUrl: _u, ...safePayload } = targetForm;
     setIsSavingEvent(true);
@@ -943,8 +985,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const matchStatus = statusFilter === 'all' || r.paymentStatus === statusFilter;
     const matchCheckIn = checkInFilter === 'all' || (r.checkInStatus || 'belum_hadir') === checkInFilter;
     const matchVaccine = vaccineFilter === 'all' || r.vaccineId === vaccineFilter;
+    const matchPetType = petTypeFilter === 'all' || r.petType === petTypeFilter;
 
-    return matchSearch && matchStatus && matchCheckIn && matchVaccine;
+    return matchSearch && matchStatus && matchCheckIn && matchVaccine && matchPetType;
   });
 
   const paymentProofRegistrations = adminData.registrations.filter((r) => {
@@ -995,7 +1038,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </button>
 
           <button
-            onClick={() => exportRegistrationsToCSV(adminData.registrations, adminData.event.title, adminData.event.spreadsheetConfig)}
+            onClick={() => exportRegistrationsToCSV(adminData.registrations, adminData.event.title, eventForm?.spreadsheetConfig || adminData.event.spreadsheetConfig)}
             className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl transition-all shadow-sm"
           >
             <Download className="w-4 h-4" />
@@ -1003,7 +1046,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </button>
 
           <button
-            onClick={() => exportGroupedSpreadsheetXLS(adminData.registrations, adminData.vaccines, adminData.event)}
+            onClick={() => exportGroupedSpreadsheetXLS(adminData.registrations, adminData.vaccines, { ...adminData.event, spreadsheetConfig: eventForm?.spreadsheetConfig || adminData.event.spreadsheetConfig })}
             className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] text-xs font-extrabold px-3.5 py-2.5 rounded-xl transition-all shadow-sm"
           >
             <FileSpreadsheet className="w-4 h-4" />
@@ -1036,7 +1079,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           { id: 'submissions', label: `Pendaftar & Reschedule (${adminData.registrations.length})`, icon: Users },
           { id: 'vouchers', label: `Voucher Petshop (${adminData.vouchers.length})`, icon: Ticket },
           { id: 'vaccines', label: `Kelola Vaksin (${adminData.vaccines.length})`, icon: Syringe },
-          { id: 'payments', label: 'Rekening & Bukti Bayar', icon: CreditCard },
+          { id: 'payments', label: 'Pembayaran Onsite & Kasir', icon: CreditCard },
           { id: 'archives', label: `Arsip & Portofolio (${adminData.archives.length})`, icon: Archive },
           { id: 'event', label: 'Event, Logo, BG & Checklist', icon: Settings },
           { id: 'sheets', label: 'Spreadsheet & Grup Tabel', icon: FileSpreadsheet },
@@ -1082,15 +1125,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             <div className="bg-white p-5 rounded-3xl border border-stone-200 shadow-xs">
-              <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Menunggu Bukti Bayar</span>
-              <span className="font-heading font-black text-3xl text-amber-600">{adminData.stats.pendingCount}</span>
+              <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Metode Pembayaran</span>
+              <span className="font-heading font-black text-xl text-[#141414] block mt-1">Onsite Booth</span>
               <span className="text-[11px] text-stone-500 font-semibold block mt-1">
-                Tersimpan permanen (tidak hangus)
+                Transaksi langsung di lokasi acara
               </span>
             </div>
 
             <div className="bg-white p-5 rounded-3xl border border-stone-200 shadow-xs">
-              <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Dana Terverifikasi</span>
+              <span className="text-[11px] text-stone-500 font-bold uppercase tracking-wider block">Estimasi Transaksi Onsite</span>
               <span className="font-heading font-black text-xl text-[#141414] block mt-1">
                 Rp {adminData.stats.totalRevenue.toLocaleString('id-ID')}
               </span>
@@ -1305,35 +1348,72 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             )}
           </div>
 
-          {/* Vaccine Quota Summary */}
-          <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="font-heading font-bold text-lg text-[#141414]">Status Kuota Real-Time Vaksin</h2>
-              <button
-                onClick={() => setActiveTab('vaccines')}
-                className="text-xs font-bold text-[#141414] bg-[#fff000] px-3 py-1.5 rounded-xl border border-[#141414]"
-              >
-                Kelola Vaksin →
-              </button>
+          {/* Pet Distribution Donut Chart & Vaccine Quota Summary */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+            <div className="lg:col-span-6">
+              <PetDistributionDonutCard
+                registrations={adminData.registrations}
+                onFilterPetType={(petType) => {
+                  setPetTypeFilter(petType);
+                  setActiveTab('submissions');
+                }}
+              />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {adminData.vaccines.map(vac => (
-                <div key={vac.id} className="p-4 rounded-2xl border border-stone-200 bg-stone-50/70 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <strong className="text-sm text-[#141414]">{vac.name}</strong>
-                    <span className="font-mono text-[11px] font-bold bg-[#fff000] px-2 py-0.5 rounded-md border border-[#141414]">
-                      {vac.code}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-stone-600">
-                    <span>Terisi: <strong>{vac.confirmedCount || 0}</strong></span>
-                    <span>Hold: <strong>{vac.heldCount || 0}</strong></span>
-                    <span>Sisa: <strong className="text-emerald-700">{vac.availableQuota ?? 0}/{vac.totalQuota}</strong></span>
-                  </div>
+
+            {/* Vaccine Quota Summary */}
+            <div className="lg:col-span-6 bg-white rounded-3xl p-6 border border-stone-200 flex flex-col justify-between space-y-4">
+              <div className="flex items-center justify-between gap-2 border-b border-stone-100 pb-4">
+                <div>
+                  <h2 className="font-heading font-bold text-lg text-[#141414]">Status Kuota Real-Time Vaksin</h2>
+                  <p className="text-xs text-stone-500 mt-0.5">Ketersediaan kuota aktif per jenis layanan vaksinasi.</p>
                 </div>
-              ))}
+                <button
+                  onClick={() => setActiveTab('vaccines')}
+                  className="text-xs font-bold text-[#141414] bg-[#fff000] px-3 py-1.5 rounded-xl border border-[#141414] shrink-0 cursor-pointer"
+                >
+                  Kelola Vaksin →
+                </button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 flex-1">
+                {adminData.vaccines.map(vac => (
+                  <div key={vac.id} className="p-3.5 rounded-2xl border border-stone-200 bg-stone-50/70 space-y-2 flex flex-col justify-between">
+                    <div className="flex items-center justify-between gap-2">
+                      <strong className="text-xs sm:text-sm text-[#141414] truncate">{vac.name}</strong>
+                      <span className="font-mono text-[10px] font-bold bg-[#fff000] px-2 py-0.5 rounded-md border border-[#141414] shrink-0">
+                        {vac.code}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-stone-600 tabular-nums">
+                      <span>Terisi: <strong>{vac.confirmedCount || 0}</strong></span>
+                      <span>Hold: <strong>{vac.heldCount || 0}</strong></span>
+                      <span>Sisa: <strong className="text-emerald-700">{vac.availableQuota ?? 0}/{vac.totalQuota}</strong></span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
+
+          {/* Real-Time Google Sheets Synchronization Visualizer */}
+          <RealtimeSheetSyncVisualizer
+            sheetConfig={adminData.sheetConfig}
+            sheetSyncState={adminData.sheetSyncState}
+            registrations={adminData.registrations}
+            isSyncingPending={isSyncingPending}
+            isSyncingAll={isSyncingAll}
+            onSyncPending={handleSyncPendingRegistrations}
+            onSyncAll={handleSyncAllRegistrations}
+            onOpenSheetSettings={() => setActiveTab('sheets')}
+          />
+
+          {/* Admin Audit Log Panel for Google Sheets Sync History */}
+          <SheetAuditLogPanel
+            logs={adminData.sheetAuditLogs || []}
+            webhookConfigured={Boolean(adminData.sheetConfig.webhookUrl && adminData.sheetConfig.webhookUrl.trim().startsWith('http'))}
+            onOpenSheetSettings={() => setActiveTab('sheets')}
+            onTestConnection={handleTestSheetConnection}
+            isTestingSheet={isTestingSheet}
+          />
         </div>
       )}
 
@@ -1352,14 +1432,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
             <div className="flex flex-wrap items-center gap-2">
               <button
-                onClick={() => exportRegistrationsToCSV(adminData.registrations, adminData.event.title, adminData.event.spreadsheetConfig)}
+                onClick={() => exportRegistrationsToCSV(adminData.registrations, adminData.event.title, eventForm?.spreadsheetConfig || adminData.event.spreadsheetConfig)}
                 className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2 rounded-xl"
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>Unduh CSV Rapi</span>
               </button>
               <button
-                onClick={() => exportGroupedSpreadsheetXLS(adminData.registrations, adminData.vaccines, adminData.event)}
+                onClick={() => exportGroupedSpreadsheetXLS(adminData.registrations, adminData.vaccines, { ...adminData.event, spreadsheetConfig: eventForm?.spreadsheetConfig || adminData.event.spreadsheetConfig })}
                 className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border border-[#141414] text-xs font-extrabold px-3.5 py-2 rounded-xl"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5" />
@@ -1386,10 +1466,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 onChange={(e) => setStatusFilter(e.target.value as any)}
                 className="px-3 py-2.5 rounded-xl border border-stone-200 text-xs font-medium bg-white"
               >
-                <option value="all">Semua Status Bayar</option>
-                <option value="verified">Sukses Booking (Verified)</option>
-                <option value="pending_payment">Menunggu Upload Bukti</option>
-                <option value="rejected">Ditolak</option>
+                <option value="all">Semua Status Booking</option>
+                <option value="verified">Sukses Booking (Onsite)</option>
+                <option value="rejected">Ditolak / Dibatalkan</option>
               </select>
 
               <select
@@ -1415,6 +1494,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 ))}
                 <option value="no-vaccine">Tidak Memilih Vaksin (Keperluan Lainnya)</option>
               </select>
+
+              <select
+                value={petTypeFilter}
+                onChange={(e) => setPetTypeFilter(e.target.value as 'all' | 'kucing' | 'anjing')}
+                className="px-3 py-2.5 rounded-xl border border-stone-200 text-xs font-medium bg-white"
+              >
+                <option value="all">Semua Jenis Hewan</option>
+                <option value="kucing">Kucing ({adminData.stats.catCount ?? 0})</option>
+                <option value="anjing">Anjing ({adminData.stats.dogCount ?? 0})</option>
+              </select>
             </div>
           </div>
 
@@ -1428,14 +1517,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <th className="py-3 px-3">Vaksin & Kloter</th>
                   <th className="py-3 px-3">Status Booking</th>
                   <th className="py-3 px-3">Kehadiran Booth</th>
-                  <th className="py-3 px-3">Bukti</th>
                   <th className="py-3 px-3 text-right">Aksi Panitia</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
                 {filteredRegistrations.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-8 text-center text-stone-400">
+                    <td colSpan={7} className="py-8 text-center text-stone-400">
                       Tidak ada pendaftar yang cocok dengan filter.
                     </td>
                   </tr>
@@ -1504,7 +1592,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           ) : (
                             <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-900 px-2.5 py-0.5 rounded-full text-[11px] font-bold">
                               <Clock className="w-3 h-3" />
-                              Menunggu Bukti
+                              Terdaftar Onsite
                             </span>
                           )}
                           {reg.voucherCode && (
@@ -1518,32 +1606,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <span className={`inline-block text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${checkInfo.cls}`}>
                             {checkInfo.label}
                           </span>
-                        </td>
-
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          {reg.paymentProofUrl ? (
-                            reg.paymentProofUrl.startsWith('http') ? (
-                              <a
-                                href={reg.paymentProofUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-blue-600 hover:underline font-bold inline-flex items-center gap-1 text-[11px]"
-                              >
-                                <LinkIcon className="w-3 h-3" />
-                                <span>Link Drive</span>
-                              </a>
-                            ) : (
-                              <button
-                                onClick={() => setSelectedProofUrl(reg.paymentProofUrl || null)}
-                                className="text-[#141414] bg-[#fff000]/60 px-2 py-1 rounded-lg font-bold inline-flex items-center gap-1 text-[11px]"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                                <span>Foto</span>
-                              </button>
-                            )
-                          ) : (
-                            <span className="text-stone-400 text-[11px]">-</span>
-                          )}
                         </td>
 
                         <td className="py-3 px-3 text-right whitespace-nowrap">
@@ -2156,17 +2218,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* ================= TAB 5: REKENING & BUKTI PAYMENT ================= */}
+      {/* ================= TAB 5: PEMBAYARAN ONSITE & REFERENSI KASIR ================= */}
       {activeTab === 'payments' && (
         <div className="space-y-6">
+          <div className="bg-yellow-50/90 border-2 border-[#141414] rounded-3xl p-5 flex items-start gap-3 text-xs sm:text-sm text-[#141414]">
+            <CheckCircle className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
+            <div>
+              <strong className="block font-heading font-extrabold text-sm sm:text-base">
+                Ketentuan Pembayaran &amp; Pembelian Produk Secara Onsite Aktif
+              </strong>
+              <p className="text-stone-700 mt-1">
+                Formulir pendaftaran publik tidak lagi meminta upload bukti payment. Seluruh peserta otomatis memperoleh nomor antrian dan menyelesaikan pembelian produk/pembayaran langsung secara <strong>onsite di booth acara</strong>. Daftar rekening di bawah hanya bersifat referensi internal kasir booth panitia.
+              </p>
+            </div>
+          </div>
+
           <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
               <div>
                 <h2 className="font-heading font-bold text-lg text-[#141414]">
-                  Nomor Rekening Tujuan Pembayaran
+                  Referensi Rekening / QRIS Kasir Booth (Onsite)
                 </h2>
                 <p className="text-xs text-stone-500">
-                  Dapat diubah admin kapan saja. Otomatis tampil di formulir peserta.
+                  Digunakan panitia/kasir saat customer bertransaksi langsung secara onsite di lokasi acara.
                 </p>
               </div>
               <button
@@ -2177,7 +2251,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 className="inline-flex items-center gap-1.5 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] text-xs font-extrabold px-4 py-2.5 rounded-xl shrink-0"
               >
                 <Plus className="w-4 h-4" />
-                <span>Tambah Rekening Tujuan</span>
+                <span>Tambah Referensi Kasir</span>
               </button>
             </div>
 
@@ -2212,50 +2286,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-100 pb-4">
-              <h2 className="font-heading font-bold text-lg text-[#141414]">Dokumentasi Bukti Payment Booking</h2>
+              <div>
+                <h2 className="font-heading font-bold text-lg text-[#141414]">Daftar Estimasi Transaksi Onsite Peserta</h2>
+                <p className="text-xs text-stone-500">Pantau layanan &amp; estimasi nilai transaksi peserta yang akan diselesaikan langsung di lokasi booth.</p>
+              </div>
               <select
                 value={paymentStatusFilter}
                 onChange={(e) => setPaymentStatusFilter(e.target.value as any)}
                 className="px-3 py-2 rounded-xl border border-stone-200 text-xs font-medium bg-white"
               >
                 <option value="all">Semua Status</option>
-                <option value="verified">Sukses Booking</option>
-                <option value="pending_payment">Menunggu Upload Bukti</option>
-                <option value="rejected">Ditolak</option>
+                <option value="verified">Booking Terkonfirmasi (Onsite)</option>
+                <option value="rejected">Ditolak / Dibatalkan</option>
               </select>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {paymentProofRegistrations.map((reg) => {
-                const hasLink = reg.paymentProofUrl && reg.paymentProofUrl.startsWith('http');
-                const hasImage = reg.paymentProofUrl && reg.paymentProofUrl.startsWith('data:');
+                const checkInfo = CHECKIN_LABELS[(reg.checkInStatus || 'belum_hadir') as CheckInStatus];
                 return (
-                  <div key={reg.id} className="p-4 rounded-2xl border border-stone-200 space-y-3">
-                    <div className="flex items-center justify-between">
+                  <div key={reg.id} className="p-4 rounded-2xl border border-stone-200 space-y-2.5 bg-stone-50/40">
+                    <div className="flex items-center justify-between gap-2">
                       <span className="font-mono text-xs font-bold bg-[#fff000] px-2 py-0.5 rounded border border-[#141414]">
                         #{reg.queueNumber || '--'} • {reg.regNumber}
                       </span>
-                      <span className="text-[11px] font-bold text-stone-600">{reg.paymentStatus.toUpperCase()}</span>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${checkInfo.cls}`}>
+                        {checkInfo.label}
+                      </span>
                     </div>
-                    <div className="rounded-xl border border-stone-200 bg-stone-50 flex items-center justify-center min-h-[130px] p-2">
-                      {hasImage ? (
-                        <img
-                          src={reg.paymentProofUrl}
-                          alt="Bukti"
-                          className="max-h-32 rounded-lg cursor-pointer"
-                          onClick={() => setSelectedProofUrl(reg.paymentProofUrl || null)}
-                        />
-                      ) : hasLink ? (
-                        <a href={reg.paymentProofUrl} target="_blank" rel="noreferrer" className="text-xs font-bold text-blue-600 underline">
-                          Buka Bukti Google Drive ↗
-                        </a>
-                      ) : (
-                        <span className="text-xs text-stone-400">Belum upload bukti</span>
-                      )}
+                    <div className="text-xs space-y-1">
+                      <strong className="block text-[#141414] text-sm">{reg.ownerName} ({reg.petName})</strong>
+                      <span className="text-stone-600 block">{reg.vaccineName}</span>
+                      <span className="text-stone-500 block">{reg.selectedSession}</span>
                     </div>
-                    <div className="text-xs space-y-0.5">
-                      <strong className="block text-[#141414]">{reg.ownerName} ({reg.petName})</strong>
-                      <span className="text-stone-500">{reg.vaccineName} • Rp {reg.totalAmount.toLocaleString('id-ID')}</span>
+                    <div className="pt-2 border-t border-stone-200 flex items-center justify-between text-xs">
+                      <span className="text-stone-500 font-semibold">Transaksi Onsite</span>
+                      <strong className="font-heading font-black text-[#141414] tabular-nums">
+                        {reg.vaccinePriceText?.trim()
+                          ? reg.vaccinePriceText.trim()
+                          : reg.totalAmount === 0
+                          ? 'Rp 0'
+                          : `Rp ${reg.totalAmount.toLocaleString('id-ID')}`}
+                      </strong>
                     </div>
                   </div>
                 );
@@ -2459,7 +2531,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               key={i}
                               src={photoUrl}
                               alt={`Dokumentasi ${i + 1}`}
-                              onClick={() => setSelectedProofUrl(photoUrl)}
+                              onClick={() => setPreviewPhotoUrl(photoUrl)}
                               className="h-20 w-full object-cover rounded-xl border border-stone-200 cursor-pointer hover:opacity-90"
                             />
                           ))}
@@ -3249,24 +3321,83 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
               </div>
 
-              {/* Column toggles & custom labels */}
+              {/* Column toggles, ordering & custom labels */}
               <div>
-                <span className="font-bold text-stone-700 block mb-2">Kolom yang Tampil di Spreadsheet (Klik centang & ubah nama kolom kapan saja):</span>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <span className="font-bold text-stone-700">
+                    Kolom CSV & Spreadsheet ({(eventForm.spreadsheetConfig?.columns || []).filter(c => c.enabled !== false).length} Aktif • Sinkron Database Peserta):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const synced = syncColumnsToCanonicalDatabaseOrder(eventForm.spreadsheetConfig?.columns);
+                      setEventForm({
+                        ...eventForm,
+                        spreadsheetConfig: { ...eventForm.spreadsheetConfig, columns: synced },
+                      });
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-stone-300 hover:bg-stone-100 text-[11px] font-bold text-[#141414] cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Urutkan Sesuai Database</span>
+                  </button>
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {(eventForm.spreadsheetConfig?.columns || []).map((col, idx) => (
-                    <div key={col.key} className="flex items-center gap-2 bg-white p-2 rounded-xl border border-stone-200">
-                      <input
-                        type="checkbox"
-                        checked={col.enabled}
-                        onChange={(e) => {
-                          const cols = [...eventForm.spreadsheetConfig.columns];
-                          cols[idx] = { ...col, enabled: e.target.checked };
-                          setEventForm({
-                            ...eventForm,
-                            spreadsheetConfig: { ...eventForm.spreadsheetConfig, columns: cols }
-                          });
-                        }}
-                      />
+                  {(eventForm.spreadsheetConfig?.columns || []).map((col, idx, arr) => (
+                    <div key={col.key} className="flex flex-col gap-1 bg-white p-2.5 rounded-xl border border-stone-200">
+                      <div className="flex items-center justify-between gap-1">
+                        <label className="inline-flex items-center gap-1.5 text-[10px] font-mono text-stone-500 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={col.enabled}
+                            onChange={(e) => {
+                              const cols = [...eventForm.spreadsheetConfig.columns];
+                              cols[idx] = { ...col, enabled: e.target.checked };
+                              setEventForm({
+                                ...eventForm,
+                                spreadsheetConfig: { ...eventForm.spreadsheetConfig, columns: cols }
+                              });
+                            }}
+                          />
+                          <span className="bg-stone-100 px-1.5 py-0.5 rounded text-stone-600">{col.key}</span>
+                        </label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            disabled={idx === 0}
+                            onClick={() => {
+                              if (idx === 0) return;
+                              const cols = [...eventForm.spreadsheetConfig.columns];
+                              [cols[idx - 1], cols[idx]] = [cols[idx], cols[idx - 1]];
+                              setEventForm({
+                                ...eventForm,
+                                spreadsheetConfig: { ...eventForm.spreadsheetConfig, columns: cols }
+                              });
+                            }}
+                            title="Geser ke atas / kiri"
+                            className="px-1.5 py-0.5 rounded bg-stone-100 hover:bg-stone-200 disabled:opacity-30 text-[10px] font-bold"
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            disabled={idx === arr.length - 1}
+                            onClick={() => {
+                              if (idx === arr.length - 1) return;
+                              const cols = [...eventForm.spreadsheetConfig.columns];
+                              [cols[idx], cols[idx + 1]] = [cols[idx + 1], cols[idx]];
+                              setEventForm({
+                                ...eventForm,
+                                spreadsheetConfig: { ...eventForm.spreadsheetConfig, columns: cols }
+                              });
+                            }}
+                            title="Geser ke bawah / kanan"
+                            className="px-1.5 py-0.5 rounded bg-stone-100 hover:bg-stone-200 disabled:opacity-30 text-[10px] font-bold"
+                          >
+                            ↓
+                          </button>
+                        </div>
+                      </div>
                       <input
                         type="text"
                         value={col.label}
@@ -3278,7 +3409,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             spreadsheetConfig: { ...eventForm.spreadsheetConfig, columns: cols }
                           });
                         }}
-                        className="flex-1 text-xs px-2 py-1 rounded border border-stone-200"
+                        className="w-full text-xs px-2 py-1 rounded border border-stone-200 font-semibold text-[#141414]"
                       />
                     </div>
                   ))}
@@ -3363,6 +3494,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </p>
             </div>
           </div>
+
+          <RealtimeSheetSyncVisualizer
+            sheetConfig={adminData.sheetConfig}
+            sheetSyncState={adminData.sheetSyncState}
+            registrations={adminData.registrations}
+            isSyncingPending={isSyncingPending}
+            isSyncingAll={isSyncingAll}
+            onSyncPending={handleSyncPendingRegistrations}
+            onSyncAll={handleSyncAllRegistrations}
+          />
+
+          <SheetAuditLogPanel
+            logs={adminData.sheetAuditLogs || []}
+            webhookConfigured={Boolean(adminData.sheetConfig.webhookUrl && adminData.sheetConfig.webhookUrl.trim().startsWith('http'))}
+            onTestConnection={handleTestSheetConnection}
+            isTestingSheet={isTestingSheet}
+          />
         </div>
       )}
 
@@ -3583,7 +3731,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               Terbitkan Voucher Petshop (Single-Use)
             </h3>
             <p className="text-stone-600">
-              Peserta: <strong>{customVoucherModalReg.ownerName}</strong> (Antrian #{customVoucherModalReg.queueNumber || '--'}) — tidak hadir di booth namun sudah bayar booking.
+              Peserta: <strong>{customVoucherModalReg.ownerName}</strong> (Antrian #{customVoucherModalReg.queueNumber || '--'}) — berhalangan hadir di booth.
             </p>
             <div>
               <label className="font-bold block mb-1">Kode Voucher Unik (Kosongkan untuk generate otomatis)</label>
@@ -3914,12 +4062,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {viewingArchive && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-3xl w-full p-6 shadow-2xl border-2 border-[#141414] space-y-4 max-h-[85vh] overflow-y-auto text-xs">
-            <div className="flex items-center justify-between border-b pb-3">
+            <div className="flex items-center justify-between gap-2 border-b pb-3 flex-wrap">
               <div>
                 <h3 className="font-heading font-bold text-lg text-[#141414]">Arsip Peserta: {viewingArchive.eventTitle}</h3>
                 <span className="text-stone-500">{viewingArchive.eventDate} • {viewingArchive.locationName}</span>
               </div>
-              <button onClick={() => setViewingArchive(null)} className="p-1 font-bold">✕</button>
+              <div className="flex items-center gap-2">
+                {viewingArchive.registrations && viewingArchive.registrations.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      exportRegistrationsToCSV(
+                        viewingArchive.registrations,
+                        viewingArchive.eventTitle,
+                        eventForm?.spreadsheetConfig || adminData.event.spreadsheetConfig
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-1.5 rounded-xl cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Unduh CSV Arsip</span>
+                  </button>
+                )}
+                <button onClick={() => setViewingArchive(null)} className="p-1 font-bold">✕</button>
+              </div>
             </div>
             {(!viewingArchive.registrations || viewingArchive.registrations.length === 0) ? (
               <p className="text-stone-400 py-8 text-center">Arsip ini hanya mencatat ringkasan portofolio (tanpa baris peserta individual).</p>
@@ -3953,18 +4119,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
-      {/* Proof / Photo Zoom Modal */}
-      {selectedProofUrl && (
+      {/* Archive Documentation Photo Zoom Modal */}
+      {previewPhotoUrl && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
-          onClick={() => setSelectedProofUrl(null)}
+          onClick={() => setPreviewPhotoUrl(null)}
         >
           <div className="relative max-w-2xl w-full bg-white rounded-3xl p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b pb-2 mb-3">
-              <span className="font-bold text-sm text-[#141414]">Pratinjau Gambar</span>
-              <button onClick={() => setSelectedProofUrl(null)} className="px-3 py-1 bg-stone-100 rounded-lg text-xs font-bold">Tutup ✕</button>
+              <span className="font-bold text-sm text-[#141414]">Pratinjau Dokumentasi</span>
+              <button onClick={() => setPreviewPhotoUrl(null)} className="px-3 py-1 bg-stone-100 rounded-lg text-xs font-bold">Tutup ✕</button>
             </div>
-            <img src={selectedProofUrl} alt="Zoom" className="max-h-[75vh] w-auto mx-auto rounded-xl object-contain" />
+            <img src={previewPhotoUrl} alt="Dokumentasi Acara" className="max-h-[75vh] w-auto mx-auto rounded-xl object-contain" />
           </div>
         </div>
       )}

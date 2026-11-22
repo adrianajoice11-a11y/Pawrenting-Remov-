@@ -99,20 +99,10 @@ export const CheckTicketModal: React.FC<CheckTicketProps> = ({ event, onBackToFo
   useEffect(() => {
     fetchLiveDirectory(query, false);
 
-    let evtSource: EventSource | null = null;
-    if (typeof EventSource !== 'undefined') {
-      evtSource = new EventSource('/api/events/stream');
-      evtSource.onmessage = (msg) => {
-        try {
-          const parsed = JSON.parse(msg.data);
-          if (parsed?.type === 'update') {
-            fetchLiveDirectory(query, true);
-          }
-        } catch {
-          // Ignore heartbeat
-        }
-      };
-    }
+    const handleServerUpdate = () => {
+      fetchLiveDirectory(query, true);
+    };
+    window.addEventListener('remov:server-update', handleServerUpdate);
 
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
@@ -121,12 +111,14 @@ export const CheckTicketModal: React.FC<CheckTicketProps> = ({ event, onBackToFo
     }
 
     const timer = setInterval(() => {
-      fetchLiveDirectory(query, true);
+      if (document.visibilityState === 'visible') {
+        fetchLiveDirectory(query, true);
+      }
     }, 6000);
 
     return () => {
       clearInterval(timer);
-      evtSource?.close();
+      window.removeEventListener('remov:server-update', handleServerUpdate);
       bc?.close();
     };
   }, [query]);
@@ -537,7 +529,7 @@ export const CheckTicketModal: React.FC<CheckTicketProps> = ({ event, onBackToFo
                       </div>
                     </div>
                     <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border shrink-0 ${badge.cls}`}>
-                      {reg.paymentStatus === 'verified' ? (reg.checkInStatus === 'sudah_hadir' ? 'Hadir' : reg.checkInStatus === 'selesai_vaksin' ? 'Selesai' : 'Booking') : 'Menunggu Bukti'}
+                      {reg.paymentStatus === 'verified' ? (reg.checkInStatus === 'sudah_hadir' ? 'Hadir' : reg.checkInStatus === 'selesai_vaksin' ? 'Selesai' : 'Booking') : 'Terdaftar'}
                     </span>
                   </button>
                 );

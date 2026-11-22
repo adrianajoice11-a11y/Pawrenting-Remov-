@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
   Sparkles, CheckCircle2, AlertCircle, Clock, ShieldCheck,
-  Upload, Copy, ArrowRight, ArrowLeft, RefreshCw, PawPrint,
+  ArrowRight, ArrowLeft, RefreshCw, PawPrint,
   Lock, Check, Share2, Printer, AlertTriangle, Phone, Mail,
-  User, MapPin, Tag, ExternalLink, Link as LinkIcon, Image as ImageIcon,
-  QrCode, CalendarClock
+  User, MapPin, Tag, ExternalLink,
+  QrCode, CalendarClock, Store
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import QRCode from 'qrcode';
@@ -70,24 +70,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   const [isLockingQuota, setIsLockingQuota] = useState<boolean>(false);
   const [lockError, setLockError] = useState<string | null>(null);
 
-  // Payment State
-  const activeBankAccounts = event.bankAccounts?.filter(b => b.active !== false) || [];
-  const [paymentMethod, setPaymentMethod] = useState<string>(activeBankAccounts[0]?.bankName || 'BCA (Bank Central Asia)');
-  const [selectedBankTarget, setSelectedBankTarget] = useState<string>(
-    activeBankAccounts[0] ? `${activeBankAccounts[0].bankName} (${activeBankAccounts[0].accountNumber})` : ''
-  );
-
-  // Proof of payment
-  const [proofType, setProofType] = useState<'upload' | 'link'>('upload');
-  const [paymentProofData, setPaymentProofData] = useState<string>('');
-  const [paymentProofName, setPaymentProofName] = useState<string>('');
-  const [paymentProofLink, setPaymentProofLink] = useState<string>('');
-
   const [hasJoinedWhatsApp, setHasJoinedWhatsApp] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Completed Registration & Late Proof Upload
+  // Completed Registration Ticket State
   const [confirmedRegistration, setConfirmedRegistration] = useState<Registration | null>(null);
   const [confirmedArchiveInfo, setConfirmedArchiveInfo] = useState<{
     eventTitle: string;
@@ -97,15 +84,8 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     completionStatement?: string;
   } | null>(null);
   const [ticketQrUrl, setTicketQrUrl] = useState<string>('');
-  const [copiedBank, setCopiedBank] = useState<string | null>(null);
-  const [lateProofType, setLateProofType] = useState<'upload' | 'link'>('upload');
-  const [lateProofData, setLateProofData] = useState<string>('');
-  const [lateProofName, setLateProofName] = useState<string>('');
-  const [lateProofLink, setLateProofLink] = useState<string>('');
-  const [isSubmittingLateProof, setIsSubmittingLateProof] = useState<boolean>(false);
-  const [lateProofError, setLateProofError] = useState<string | null>(null);
 
-  // Returning customer saved registration references on this device (read-only server lookup)
+  // Returning customer saved registration references on this device (synced live with server)
   interface SavedRegistrationRef {
     id: string;
     regNumber: string;
@@ -113,6 +93,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     petName: string;
     ownerName: string;
     vaccineName: string;
+    selectedSession?: string;
+    paymentStatus?: string;
+    checkInStatus?: string;
+    voucherCode?: string;
+    isArchived?: boolean;
     createdAt: string;
   }
   const SAVED_REGS_KEY = 'remov_my_registrations_v1';
@@ -128,8 +113,23 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
   });
   const [loadingSavedRegId, setLoadingSavedRegId] = useState<string | null>(null);
   const [savedRegError, setSavedRegError] = useState<string | null>(null);
+  const [lastTicketSyncAt, setLastTicketSyncAt] = useState<number | null>(null);
+  const [isRefreshingTicket, setIsRefreshingTicket] = useState<boolean>(false);
+  const [matchedLookupRegs, setMatchedLookupRegs] = useState<{ registration: Registration; isArchived?: boolean; archiveInfo?: any }[]>([]);
 
-  const persistRegistrationRef = (reg: Registration) => {
+  const broadcastCustomerSync = () => {
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('remov_event_sync');
+        bc.postMessage({ type: 'update', ts: Date.now() });
+        bc.close();
+      }
+    } catch {
+      // Ignore BroadcastChannel errors
+    }
+  };
+
+  const persistRegistrationRef = (reg: Registration, isArchived?: boolean) => {
     const nextRef: SavedRegistrationRef = {
       id: reg.id,
       regNumber: reg.regNumber,
@@ -137,6 +137,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       petName: reg.petName,
       ownerName: reg.ownerName,
       vaccineName: reg.vaccineName,
+      selectedSession: reg.selectedSession,
+      paymentStatus: reg.paymentStatus,
+      checkInStatus: reg.checkInStatus,
+      voucherCode: reg.voucherCode,
+      isArchived,
       createdAt: reg.createdAt,
     };
     setSavedRegRefs((prev) => {
@@ -201,18 +206,6 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     }
   }, [availableVaccines, petType, selectedVaccineId]);
 
-  useEffect(() => {
-    if (activeBankAccounts.length > 0) {
-      const stillValid = activeBankAccounts.some(b => selectedBankTarget.includes(b.accountNumber));
-      if (!selectedBankTarget || !stillValid) {
-        setSelectedBankTarget(`${activeBankAccounts[0].bankName} (${activeBankAccounts[0].accountNumber})`);
-        setPaymentMethod(activeBankAccounts[0].bankName);
-      }
-    } else if (selectedBankTarget) {
-      setSelectedBankTarget('');
-    }
-  }, [activeBankAccounts, selectedBankTarget]);
-
   // Keep session valid if admin updated event.sessions
   useEffect(() => {
     if (event.sessions.length > 0 && !event.sessions.includes(selectedSession)) {
@@ -267,53 +260,138 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     }
   }, [confirmedRegistration?.id, confirmedRegistration?.paymentStatus, confirmedRegistration?.queueNumber, confirmedRegistration?.selectedSession, event.date]);
 
-  // Real-time auto-sync for the customer's active ticket (check-in, kloter reschedule, payment status, event completion)
+  // Real-time auto-sync for all customer saved registrations on this device (even before opening Step 5)
+  const savedRegIdsSignature = savedRegRefs.map(r => r.id).join(',');
   useEffect(() => {
-    if (!confirmedRegistration?.id) return;
-    const regId = confirmedRegistration.id;
+    if (!savedRegIdsSignature) return;
+    const ids = savedRegIdsSignature.split(',').filter(Boolean);
 
-    const refreshTicket = async () => {
+    const syncSavedBatch = async () => {
       try {
-        const res = await fetch(`/api/registrations/${encodeURIComponent(regId)}?_t=${Date.now()}`, {
+        const res = await fetch('/api/registrations/sync-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           cache: 'no-store',
+          body: JSON.stringify({ ids }),
         });
         if (!res.ok) return;
         const data = await res.json();
-        if (data.success && data.registration) {
-          setConfirmedRegistration(data.registration);
-          setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
-          persistRegistrationRef(data.registration);
-        }
+        if (!data.success || !data.items) return;
+
+        setSavedRegRefs(prev => {
+          let changed = false;
+          const next = prev.map(item => {
+            const freshWrap = data.items[item.id];
+            if (!freshWrap || !freshWrap.registration) return item;
+            const reg: Registration = freshWrap.registration;
+            const isArch = Boolean(freshWrap.isArchived);
+            if (
+              item.queueNumber !== reg.queueNumber ||
+              item.paymentStatus !== reg.paymentStatus ||
+              item.checkInStatus !== reg.checkInStatus ||
+              item.selectedSession !== reg.selectedSession ||
+              item.voucherCode !== reg.voucherCode ||
+              item.vaccineName !== reg.vaccineName ||
+              item.isArchived !== isArch
+            ) {
+              changed = true;
+              return {
+                ...item,
+                regNumber: reg.regNumber,
+                queueNumber: reg.queueNumber,
+                petName: reg.petName,
+                ownerName: reg.ownerName,
+                vaccineName: reg.vaccineName,
+                selectedSession: reg.selectedSession,
+                paymentStatus: reg.paymentStatus,
+                checkInStatus: reg.checkInStatus,
+                voucherCode: reg.voucherCode,
+                isArchived: isArch,
+              };
+            }
+            return item;
+          });
+          if (changed) {
+            try {
+              localStorage.setItem(SAVED_REGS_KEY, JSON.stringify(next));
+            } catch {
+              // Ignore storage quota errors
+            }
+          }
+          return changed ? next : prev;
+        });
       } catch {
-        // Ignore transient network errors
+        // Ignore transient offline errors
       }
     };
 
-    let evtSource: EventSource | null = null;
-    if (typeof EventSource !== 'undefined') {
-      evtSource = new EventSource('/api/events/stream');
-      evtSource.onmessage = (msg) => {
-        try {
-          const parsed = JSON.parse(msg.data);
-          if (parsed?.type === 'update') {
-            refreshTicket();
-          }
-        } catch {
-          // Ignore heartbeat
-        }
-      };
-    }
+    syncSavedBatch();
+    window.addEventListener('remov:server-update', syncSavedBatch);
 
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       bc = new BroadcastChannel('remov_event_sync');
-      bc.onmessage = () => refreshTicket();
+      bc.onmessage = () => syncSavedBatch();
     }
 
-    const timer = setInterval(refreshTicket, 6000);
+    const handleVis = () => {
+      if (document.visibilityState === 'visible') syncSavedBatch();
+    };
+    document.addEventListener('visibilitychange', handleVis);
+
+    return () => {
+      window.removeEventListener('remov:server-update', syncSavedBatch);
+      bc?.close();
+      document.removeEventListener('visibilitychange', handleVis);
+    };
+  }, [savedRegIdsSignature]);
+
+  const refreshActiveTicket = async (manual = false) => {
+    if (!confirmedRegistration?.id) return;
+    if (manual) setIsRefreshingTicket(true);
+    try {
+      const res = await fetch(`/api/registrations/${encodeURIComponent(confirmedRegistration.id)}?_t=${Date.now()}`, {
+        cache: 'no-store',
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.success && data.registration) {
+        setConfirmedRegistration(data.registration);
+        setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
+        persistRegistrationRef(data.registration, Boolean(data.isArchived));
+        setLastTicketSyncAt(Date.now());
+      }
+    } catch {
+      // Ignore transient network errors
+    } finally {
+      if (manual) setIsRefreshingTicket(false);
+    }
+  };
+
+  // Real-time auto-sync for the customer's active ticket (check-in, kloter reschedule, payment status, event completion)
+  useEffect(() => {
+    if (!confirmedRegistration?.id) return;
+    setLastTicketSyncAt(Date.now());
+
+    const handleServerUpdate = () => {
+      refreshActiveTicket(false);
+    };
+    window.addEventListener('remov:server-update', handleServerUpdate);
+
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      bc = new BroadcastChannel('remov_event_sync');
+      bc.onmessage = () => refreshActiveTicket(false);
+    }
+
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        refreshActiveTicket(false);
+      }
+    }, 6000);
     return () => {
       clearInterval(timer);
-      evtSource?.close();
+      window.removeEventListener('remov:server-update', handleServerUpdate);
       bc?.close();
     };
   }, [confirmedRegistration?.id, event.eventStatus, event.eventCompletedAt]);
@@ -434,36 +512,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     onRefreshData();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, isLate = false) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 8 * 1024 * 1024) {
-      alert('Ukuran file maksimal 8MB.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      if (isLate) {
-        setLateProofName(file.name);
-        setLateProofData(reader.result as string);
-      } else {
-        setPaymentProofName(file.name);
-        setPaymentProofData(reader.result as string);
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSubmitRegistration = async (allowDeferred = false) => {
-    const finalProofUrl = allowDeferred
-      ? ''
-      : (proofType === 'upload' ? paymentProofData : paymentProofLink.trim());
-
-    if (!allowDeferred && !finalProofUrl && grandTotal > 0) {
-      setSubmitError('Silakan unggah foto / tempel link bukti payment booking terlebih dahulu, atau klik tombol "Simpan Dulu & Upload Bukti Nanti".');
-      return;
-    }
-
+  const handleSubmitRegistration = async () => {
     setIsSubmitting(true);
     setSubmitError(null);
 
@@ -494,9 +543,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
         vaccineNotes: vaccineNotes.trim(),
         selectedSession,
         totalAmount: grandTotal,
-        paymentMethod: grandTotal === 0 ? 'Tanpa Biaya' : paymentMethod,
-        paymentBankTarget: grandTotal === 0 ? '' : selectedBankTarget,
-        paymentProofUrl: grandTotal === 0 ? '' : finalProofUrl,
+        paymentMethod: grandTotal === 0 ? 'Tanpa Biaya (Onsite)' : 'Pembayaran Onsite (Di Lokasi Event)',
+        paymentBankTarget: '',
+        paymentProofUrl: '',
         joinedWhatsAppGroup: hasJoinedWhatsApp,
       };
 
@@ -514,11 +563,14 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
 
       setConfirmedRegistration(data.registration);
       setConfirmedArchiveInfo(null);
-      persistRegistrationRef(data.registration);
+      setMatchedLookupRegs([]);
+      persistRegistrationRef(data.registration, false);
       setHoldId(null);
       setHoldExpiresAt(null);
       setCurrentStep(5);
+      setLastTicketSyncAt(Date.now());
       onRefreshData();
+      broadcastCustomerSync();
     } catch (err: any) {
       setSubmitError(err.message || 'Terjadi kesalahan sistem saat menyimpan pendaftaran.');
     } finally {
@@ -526,40 +578,20 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     }
   };
 
-  const handleSubmitLateProof = async () => {
-    if (!confirmedRegistration) return;
-    const proofUrl = lateProofType === 'upload' ? lateProofData : lateProofLink.trim();
-    if (!proofUrl) {
-      setLateProofError('Mohon unggah foto bukti pembayaran atau masukkan link Google Drive terlebih dahulu.');
-      return;
-    }
-
-    setIsSubmittingLateProof(true);
-    setLateProofError(null);
+  const handleMarkWhatsAppJoined = async () => {
+    if (!confirmedRegistration?.id || confirmedRegistration.joinedWhatsAppGroup) return;
     try {
-      const res = await fetch(`/api/registrations/${confirmedRegistration.id}/submit-proof`, {
+      const res = await fetch(`/api/registrations/${confirmedRegistration.id}/whatsapp-joined`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          paymentProofUrl: proofUrl,
-          paymentMethod,
-          paymentBankTarget: selectedBankTarget,
-          joinedWhatsAppGroup: hasJoinedWhatsApp,
-        })
       });
       const data = await res.json();
-      if (!res.ok || !data.success) {
-        setLateProofError(data.message || 'Gagal memverifikasi bukti bayar.');
-        onRefreshData();
-        return;
+      if (res.ok && data.success && data.registration) {
+        setConfirmedRegistration(data.registration);
+        persistRegistrationRef(data.registration, Boolean(confirmedArchiveInfo));
+        broadcastCustomerSync();
       }
-      setConfirmedRegistration(data.registration);
-      persistRegistrationRef(data.registration);
-      onRefreshData();
-    } catch (err: any) {
-      setLateProofError(err.message || 'Gagal mengirim bukti pembayaran.');
-    } finally {
-      setIsSubmittingLateProof(false);
+    } catch {
+      // Non-blocking tracking
     }
   };
 
@@ -579,7 +611,16 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
       }
       setConfirmedRegistration(data.registration);
       setConfirmedArchiveInfo(data.isArchived ? (data.archiveInfo || null) : null);
-      persistRegistrationRef(data.registration);
+      if (Array.isArray(data.matches) && data.matches.length > 0) {
+        setMatchedLookupRegs(data.matches);
+        data.matches.forEach((m: any) => {
+          if (m?.registration) persistRegistrationRef(m.registration, Boolean(m.isArchived));
+        });
+      } else {
+        setMatchedLookupRegs([]);
+        persistRegistrationRef(data.registration, Boolean(data.isArchived));
+      }
+      setLastTicketSyncAt(Date.now());
       setCurrentStep(5);
       setShowResumeBox(false);
     } catch (err: any) {
@@ -587,12 +628,6 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     } finally {
       setIsSearchingResume(false);
     }
-  };
-
-  const copyToClipboard = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedBank(key);
-    setTimeout(() => setCopiedBank(null), 2500);
   };
 
   const formatTimer = (seconds: number) => {
@@ -611,12 +646,6 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
     setPetAge('');
     setChecklistChecked({});
     setVaccineNotes('');
-    setPaymentProofData('');
-    setPaymentProofName('');
-    setPaymentProofLink('');
-    setLateProofData('');
-    setLateProofName('');
-    setLateProofLink('');
     setConfirmedRegistration(null);
     setTicketQrUrl('');
     setCurrentStep(2);
@@ -811,7 +840,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 onClick={() => setShowResumeBox(!showResumeBox)}
                 className="underline font-bold text-[#141414] hover:text-stone-700 cursor-pointer"
               >
-                Sudah daftar? Upload Bukti Bayar / Cek Antrian →
+                Sudah daftar? Cek Nomor Antrian &amp; Tiket →
               </button>
             </div>
           </div>
@@ -850,9 +879,28 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      {refItem.queueNumber && (
+                      {refItem.queueNumber ? (
                         <span className="bg-[#141414] text-[#fff000] text-[10px] font-black px-2 py-0.5 rounded-md">
                           Antrian #{refItem.queueNumber}
+                        </span>
+                      ) : (
+                        <span className="bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold px-2 py-0.5 rounded-md">
+                          Terdaftar Onsite
+                        </span>
+                      )}
+                      {refItem.checkInStatus === 'sudah_hadir' && (
+                        <span className="bg-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-md">
+                          ✓ Hadir Booth
+                        </span>
+                      )}
+                      {refItem.checkInStatus === 'selesai_vaksin' && (
+                        <span className="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-md">
+                          ✓ Selesai Vaksin
+                        </span>
+                      )}
+                      {refItem.isArchived && (
+                        <span className="bg-stone-200 text-stone-700 text-[10px] font-bold px-2 py-0.5 rounded-md">
+                          Arsip Event
                         </span>
                       )}
                       <span className="font-mono text-[11px] font-bold text-stone-700 truncate">
@@ -863,7 +911,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                       {refItem.ownerName} — {refItem.petName}
                     </p>
                     <p className="text-[11px] text-stone-600 truncate">
-                      {refItem.vaccineName}
+                      {refItem.vaccineName}{refItem.selectedSession ? ` • ${refItem.selectedSession}` : ''}
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
@@ -895,7 +943,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
           <div className="bg-white rounded-3xl p-5 border-2 border-[#141414] shadow-lg mb-6 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-heading font-bold text-base text-[#141414]">
-                Lanjutkan Upload Bukti Pembayaran / Cek Nomor Antrian Anda
+                Cek Nomor Antrian &amp; E-Pass Pendaftaran Anda
               </h3>
               <button
                 type="button"
@@ -933,7 +981,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 { num: 1, title: 'Data Pawrent', desc: 'Identitas Pemilik' },
                 { num: 2, title: 'Anabul & Syarat', desc: 'Profil & Checklist' },
                 { num: 3, title: 'Pilih Vaksin', desc: 'Kuota Real-Time' },
-                { num: 4, title: 'Bayar & Antrian', desc: 'Upload Bukti' },
+                { num: 4, title: 'Konfirmasi Onsite', desc: 'Ambil Antrian' },
               ].map((step, idx) => {
                 const isActive = currentStep === step.num;
                 const isPast = currentStep > step.num;
@@ -1794,7 +1842,7 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                     ) : (
                       <>
                         <Lock className="w-4 h-4" />
-                        <span>Kunci Kuota & Lanjut Bayar</span>
+                        <span>Kunci Kuota &amp; Lanjut Konfirmasi</span>
                         <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                       </>
                     )}
@@ -1936,7 +1984,9 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 )}
 
                 <div className="mt-4 pt-3 border-t border-stone-200 flex items-center justify-between gap-2 flex-wrap">
-                  <span className="font-bold text-sm text-[#141414]">Total Tagihan Booking:</span>
+                  <span className="font-bold text-sm text-[#141414]">
+                    {grandTotal === 0 ? 'Biaya Layanan:' : 'Estimasi Pembayaran Onsite (Di Lokasi):'}
+                  </span>
                   <span className="font-heading font-black text-base sm:text-xl text-[#141414] bg-[#fff000] px-3 py-1 rounded-xl border border-[#141414]">
                     {grandTotal === 0
                       ? (!isNoVaccineSelected && selectedVaccine?.priceText?.trim()
@@ -1947,322 +1997,115 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                 </div>
               </div>
 
-              {/* Rekening Tujuan */}
-              {grandTotal > 0 && (
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-heading font-bold text-base text-[#141414]">
-                      Pilih Rekening Tujuan Transfer Resmi
-                    </h3>
-                    <span className="text-xs text-stone-400">Klik untuk memilih:</span>
+              {/* Ketentuan Pembelian & Pembayaran Onsite */}
+              <div className="bg-yellow-50/90 rounded-3xl p-5 border-2 border-[#141414] space-y-2.5">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-[#fff000] border border-[#141414] text-[#141414] flex items-center justify-center shrink-0">
+                    <Store className="w-5 h-5" />
                   </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {activeBankAccounts.map((acc) => {
-                      const isSelected = selectedBankTarget.includes(acc.accountNumber);
-                      return (
-                        <div
-                          key={acc.id}
-                          onClick={() => {
-                            setPaymentMethod(acc.bankName);
-                            setSelectedBankTarget(`${acc.bankName} (${acc.accountNumber})`);
-                          }}
-                          className={`p-4 rounded-2xl border-2 transition-all cursor-pointer ${
-                            isSelected
-                              ? 'border-[#141414] bg-[#fff000]/25 ring-2 ring-[#fff000]'
-                              : 'border-stone-200 bg-white hover:bg-stone-50'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="font-bold text-xs uppercase tracking-wide text-[#141414]">
-                              {acc.bankName}
-                            </span>
-                            {isSelected && <Check className="w-4 h-4 text-[#141414] stroke-3" />}
-                          </div>
-                          <div className="bg-white p-2.5 rounded-xl border border-stone-200 flex items-center justify-between mb-1.5">
-                            <span className="font-mono font-bold text-sm text-[#141414] select-all">
-                              {acc.accountNumber}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                copyToClipboard(acc.accountNumber.replace(/[^0-9]/g, ''), acc.id);
-                              }}
-                              className="text-stone-500 hover:text-[#141414] p-1"
-                              title="Salin Nomor Rekening"
-                            >
-                              {copiedBank === acc.id ? (
-                                <span className="text-[11px] font-bold text-emerald-600">Disalin!</span>
-                              ) : (
-                                <Copy className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          </div>
-                          <span className="text-[11px] text-stone-600 block font-medium">
-                            a.n. {acc.accountHolder}
-                          </span>
-                        </div>
-                      );
-                    })}
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-heading font-extrabold text-sm sm:text-base text-[#141414]">
+                        Ketentuan Pembayaran &amp; Pembelian Produk Secara Onsite
+                      </h3>
+                      <span className="bg-emerald-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                        Tanpa Upload Bukti Bayar Online
+                      </span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-stone-700 leading-relaxed">
+                      Customer <strong>tidak perlu melakukan transfer atau mengunggah bukti pembayaran secara online</strong>. Sesuai ketentuan panitia penyelenggara, customer wajib datang langsung ke lokasi acara secara <strong>onsite</strong> pada kloter yang dipilih untuk membeli produk serta menyelesaikan transaksi di tempat. Klik tombol konfirmasi di bawah ini untuk langsung mendapatkan <strong>Nomor Antrian &amp; Barcode Booth</strong>.
+                    </p>
                   </div>
                 </div>
-              )}
-
-              {/* Upload Bukti Payment (Hanya jika berbayar) */}
-              {grandTotal > 0 ? (
-                <div className="bg-yellow-50/90 rounded-3xl p-5 border-2 border-[#141414] space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <label className="block text-xs font-extrabold text-[#141414] uppercase tracking-wider">
-                          Bukti Payment Booking Vaksin
-                        </label>
-                        <span className="bg-emerald-600 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-full">
-                          Otomatis Terverifikasi & Dapat No. Antrian
-                        </span>
-                      </div>
-                      <p className="text-xs text-stone-700 mt-0.5">
-                        Lampirkan foto bukti transfer atau link Drive untuk langsung mendapat <strong>Nomor Antrian (01, 02, ...)</strong> & Barcode Booth.
-                      </p>
-                    </div>
-
-                    <div className="inline-flex rounded-xl bg-white border border-stone-300 p-1 text-xs font-bold shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setProofType('upload')}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                          proofType === 'upload' ? 'bg-[#fff000] text-[#141414] font-extrabold' : 'text-stone-600'
-                        }`}
-                      >
-                        <ImageIcon className="w-3.5 h-3.5" />
-                        <span>Upload Foto</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setProofType('link')}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                          proofType === 'link' ? 'bg-[#fff000] text-[#141414] font-extrabold' : 'text-stone-600'
-                        }`}
-                      >
-                        <LinkIcon className="w-3.5 h-3.5" />
-                        <span>Link Drive</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {proofType === 'upload' && (
-                    <div className="space-y-3">
-                      <div className="flex flex-col sm:flex-row items-center gap-4">
-                        <label className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-white hover:bg-stone-50 text-[#141414] font-bold px-5 py-3 rounded-2xl border-2 border-[#141414] shadow-xs cursor-pointer text-sm transition-colors">
-                          <Upload className="w-4 h-4" />
-                          <span>Pilih Foto Bukti Transfer (JPG/PNG)</span>
-                          <input
-                            type="file"
-                            accept="image/*,application/pdf"
-                            onChange={(e) => handleFileChange(e, false)}
-                            className="hidden"
-                          />
-                        </label>
-
-                        {paymentProofName ? (
-                          <div className="flex items-center gap-2 text-xs font-bold text-emerald-700 bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200">
-                            <CheckCircle2 className="w-4 h-4" />
-                            <span className="truncate max-w-xs">{paymentProofName}</span>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-stone-500">Belum ada file dipilih</span>
-                        )}
-                      </div>
-
-                      {paymentProofData && (
-                        <div>
-                          <img
-                            src={paymentProofData}
-                            alt="Bukti Transfer"
-                            className="max-h-40 rounded-2xl border border-stone-300 shadow-xs"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {proofType === 'link' && (
-                    <div className="relative">
-                      <input
-                        type="url"
-                        placeholder="Contoh: https://drive.google.com/open?id=..."
-                        value={paymentProofLink}
-                        onChange={(e) => setPaymentProofLink(e.target.value)}
-                        className="w-full pl-10 pr-4 py-3 rounded-2xl border border-stone-300 focus:border-[#141414] outline-hidden text-xs sm:text-sm bg-white"
-                      />
-                      <LinkIcon className="w-4 h-4 text-stone-400 absolute left-3.5 top-3.5" />
-                    </div>
-                  )}
-
-                  {/* Info Simpan Permanen (Tanpa Sistem Hangus) */}
-                  <div className="bg-sky-50 border border-sky-300 rounded-2xl p-3.5 flex items-start gap-2.5 text-xs text-sky-950">
-                    <Clock className="w-4 h-4 text-sky-700 shrink-0 mt-0.5" />
-                    <span>
-                      <strong>Info:</strong> Jika belum bisa mengunggah bukti bayar sekarang, Anda dapat menyimpan pendaftaran terlebih dahulu. Data pendaftaran tersimpan permanen (<strong>tidak hangus</strong>) dan Anda dapat mengunggah bukti bayar kapan saja untuk mengaktifkan Nomor Antrian.
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-emerald-50/90 rounded-3xl p-5 border-2 border-emerald-400 flex items-start gap-3 text-xs sm:text-sm text-emerald-950">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="block font-extrabold">Pendaftaran Tanpa Biaya Booking (GRATIS / Rp 0)</strong>
-                    <span>
-                      Tidak perlu melakukan transfer atau mengunggah bukti pembayaran. Klik tombol konfirmasi di bawah untuk langsung mendapatkan <strong>Nomor Antrian & Barcode Booth</strong>.
-                    </span>
-                  </div>
-                </div>
-              )}
+              </div>
 
               {/* Actions */}
               <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-stone-100">
                 <button
                   type="button"
                   onClick={handleReleaseHoldAndBack}
-                  className="w-full sm:w-auto px-4 py-3 rounded-2xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-sm font-semibold transition-colors"
+                  className="w-full sm:w-auto px-4 py-3 rounded-2xl border border-rose-200 text-rose-700 hover:bg-rose-50 text-sm font-semibold transition-colors cursor-pointer"
                 >
                   {holdId ? 'Batalkan & Lepaskan Kuota' : 'Kembali Ubah Pilihan'}
                 </button>
 
-                <div className="flex flex-col sm:flex-row items-center gap-2.5 w-full sm:w-auto">
-                  {grandTotal > 0 && !paymentProofData && !paymentProofLink.trim() && (
-                    <button
-                      type="button"
-                      disabled={isSubmitting}
-                      onClick={() => handleSubmitRegistration(true)}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-stone-100 hover:bg-stone-200 text-[#141414] border border-stone-300 font-bold px-5 py-3.5 rounded-2xl text-xs sm:text-sm transition-all"
-                    >
-                      <Clock className="w-4 h-4" />
-                      <span>Simpan Dulu &amp; Upload Bukti Nanti</span>
-                    </button>
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={handleSubmitRegistration}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold px-7 py-3.5 rounded-2xl shadow-md text-sm transition-all cursor-pointer"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Memproses &amp; Membuat Antrian...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-5 h-5" />
+                      <span>Konfirmasi Booking &amp; Ambil No. Antrian</span>
+                    </>
                   )}
-
-                  <button
-                    type="button"
-                    disabled={isSubmitting}
-                    onClick={() => handleSubmitRegistration(false)}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold px-7 py-3.5 rounded-2xl shadow-md text-sm transition-all cursor-pointer"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Memproses & Membuat Antrian...</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-5 h-5" />
-                        <span>{grandTotal === 0 ? 'Konfirmasi Pendaftaran & Ambil No. Antrian' : 'Konfirmasi Booking & Ambil No. Antrian'}</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                </button>
               </div>
             </div>
           )}
 
-          {/* ================= STEP 5: NOMOR ANTRIAN / MENUNGGU UPLOAD BUKTI ================= */}
+          {/* ================= STEP 5: NOMOR ANTRIAN & BARCODE ONSITE ================= */}
           {currentStep === 5 && confirmedRegistration && (
             <div className="space-y-6">
+              {/* Real-Time Sync Status Header + Multi-Pet Switcher */}
+              <div className="no-print flex flex-wrap items-center justify-between gap-2 bg-stone-50 border border-stone-200 px-4 py-2.5 rounded-2xl text-[11px]">
+                <div className="flex items-center gap-2 text-stone-700">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                  <span className="font-bold text-[#141414]">Sinkronisasi Real-Time Aktif</span>
+                  {lastTicketSyncAt && (
+                    <span className="text-stone-500">
+                      • Diperbarui {new Date(lastTicketSyncAt).toLocaleTimeString('id-ID')}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={isRefreshingTicket}
+                  onClick={() => refreshActiveTicket(true)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-stone-300 hover:bg-stone-100 text-[#141414] font-bold cursor-pointer"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRefreshingTicket ? 'animate-spin' : ''}`} />
+                  <span>{isRefreshingTicket ? 'Menyinkronkan...' : 'Perbarui Status'}</span>
+                </button>
+              </div>
 
-              {/* CASE A: PENDING PAYMENT (Tersimpan Permanen + Inline Proof Upload) */}
-              {(confirmedRegistration.paymentStatus === 'pending_payment' || confirmedRegistration.paymentStatus === 'expired') && (
-                <div className="space-y-6">
-                  <div className="bg-amber-50 border-2 border-amber-500 rounded-3xl p-6 space-y-4">
-                    <div className="flex items-start gap-3">
-                      <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0">
-                        <Clock className="w-6 h-6" />
-                      </div>
-                      <div>
-                        <span className="bg-amber-200 text-amber-950 text-[11px] font-black uppercase px-2.5 py-0.5 rounded-full">
-                          Menunggu Upload Bukti Pembayaran
-                        </span>
-                        <h2 className="font-heading font-black text-xl text-[#141414] mt-1">
-                          Data Tersimpan Permanen — Upload Bukti Payment Booking
-                        </h2>
-                        <p className="text-xs sm:text-sm text-stone-700 mt-1">
-                          Data pendaftaran Anda (<strong>{confirmedRegistration.regNumber}</strong>) sudah tercatat secara permanen untuk <strong>{confirmedRegistration.vaccineName}</strong> dan <strong>tidak akan hangus</strong>. Anda dapat mengunggah bukti payment booking kapan saja melalui form di bawah ini agar langsung memperoleh <strong>Nomor Antrian &amp; Barcode</strong>.
-                        </p>
-                      </div>
-                    </div>
-
-                    {lateProofError && (
-                      <div className="bg-rose-100 border border-rose-300 text-rose-800 rounded-xl p-3 text-xs font-semibold">
-                        {lateProofError}
-                      </div>
-                    )}
-
-                    {/* Inline Late Proof Upload */}
-                    <div className="bg-white rounded-2xl p-4 border border-amber-300 space-y-3">
-                      <div className="flex items-center justify-between flex-wrap gap-2">
-                        <span className="text-xs font-extrabold uppercase text-[#141414]">
-                          Upload Bukti Payment Sekarang untuk Aktifkan Nomor Antrian:
-                        </span>
-                        <div className="inline-flex rounded-lg bg-stone-100 p-0.5 text-xs font-bold">
-                          <button
-                            type="button"
-                            onClick={() => setLateProofType('upload')}
-                            className={`px-2.5 py-1 rounded-md ${lateProofType === 'upload' ? 'bg-[#fff000] text-[#141414]' : 'text-stone-600'}`}
-                          >
-                            Upload Foto
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setLateProofType('link')}
-                            className={`px-2.5 py-1 rounded-md ${lateProofType === 'link' ? 'bg-[#fff000] text-[#141414]' : 'text-stone-600'}`}
-                          >
-                            Link Drive
-                          </button>
-                        </div>
-                      </div>
-
-                      {lateProofType === 'upload' ? (
-                        <div className="flex flex-col sm:flex-row items-center gap-3">
-                          <label className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-stone-100 hover:bg-stone-200 text-[#141414] font-bold px-4 py-2.5 rounded-xl border border-stone-300 cursor-pointer text-xs">
-                            <Upload className="w-4 h-4" />
-                            <span>Pilih File Bukti Transfer</span>
-                            <input
-                              type="file"
-                              accept="image/*,application/pdf"
-                              onChange={(e) => handleFileChange(e, true)}
-                              className="hidden"
-                            />
-                          </label>
-                          {lateProofName && (
-                            <span className="text-xs font-bold text-emerald-700">{lateProofName}</span>
-                          )}
-                        </div>
-                      ) : (
-                        <input
-                          type="url"
-                          placeholder="https://drive.google.com/..."
-                          value={lateProofLink}
-                          onChange={(e) => setLateProofLink(e.target.value)}
-                          className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs outline-hidden focus:border-[#141414]"
-                        />
-                      )}
-
+              {matchedLookupRegs.length > 1 && (
+                <div className="no-print bg-yellow-50 border border-[#141414]/25 rounded-2xl p-3 space-y-2">
+                  <span className="text-[11px] font-extrabold text-[#141414] block">
+                    Ditemukan {matchedLookupRegs.length} Pendaftaran Anabul Terdaftar — Pilih untuk melihat tiket:
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {matchedLookupRegs.map(item => (
                       <button
+                        key={item.registration.id}
                         type="button"
-                        disabled={isSubmittingLateProof}
-                        onClick={handleSubmitLateProof}
-                        className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-[#fff000] hover:bg-yellow-300 text-[#141414] border-2 border-[#141414] font-extrabold px-6 py-3 rounded-xl text-xs sm:text-sm"
+                        onClick={() => {
+                          setConfirmedRegistration(item.registration);
+                          setConfirmedArchiveInfo(item.isArchived ? (item.archiveInfo || null) : null);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                          confirmedRegistration.id === item.registration.id
+                            ? 'bg-[#141414] text-[#fff000] border-[#141414]'
+                            : 'bg-white text-[#141414] border-stone-300 hover:bg-stone-100'
+                        }`}
                       >
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>{isSubmittingLateProof ? 'Memverifikasi...' : 'Kirim Bukti & Dapatkan Nomor Antrian Sekarang'}</span>
+                        {item.registration.queueNumber ? `#${item.registration.queueNumber} • ` : ''}
+                        {item.registration.petName} ({item.registration.vaccineName})
                       </button>
-                    </div>
+                    ))}
                   </div>
                 </div>
               )}
 
-              {/* CASE C: VERIFIED BOOKING -> NOMOR ANTRIAN (01, 02, 03...) + BARCODE + EDITABLE NOTES */}
-              {confirmedRegistration.paymentStatus === 'verified' && (
+              {/* CASE C: VERIFIED BOOKING -> NOMOR ANTRIAN (01, 02, 03...) + BARCODE + ONSITE INFO */}
+              {confirmedRegistration.paymentStatus !== 'rejected' && (
                 <div className="space-y-6">
                   <div className="text-center max-w-lg mx-auto py-1">
                     <div className="w-16 h-16 bg-[#fff000] border-2 border-[#141414] text-[#141414] rounded-full flex items-center justify-center mx-auto mb-3 shadow-sm">
@@ -2348,6 +2191,11 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                                 <CalendarClock className="w-3.5 h-3.5 shrink-0" />
                                 {confirmedRegistration.selectedSession}
                               </strong>
+                              {confirmedRegistration.rescheduledFromSession && (
+                                <span className="block text-[11px] text-amber-700 font-semibold mt-0.5">
+                                  Diubah panitia dari: {confirmedRegistration.rescheduledFromSession}
+                                </span>
+                              )}
                             </div>
                             <div>
                               <span className="text-[11px] text-stone-400 uppercase font-bold block">Pawrent</span>
@@ -2382,9 +2230,12 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                           </div>
 
                           {/* Editable Description Note beneath Queue Number */}
-                          <div className="bg-[#fff000]/45 border border-[#141414]/30 rounded-2xl p-4 text-left">
+                          <div className="bg-[#fff000]/45 border border-[#141414]/30 rounded-2xl p-4 text-left space-y-1.5">
                             <p className="text-xs sm:text-sm font-semibold text-[#141414] leading-relaxed">
                               {event.ticketArrivalNote || 'Harap datang ke booth Pawrenting REMOV tepat waktu sesuai kloter jam yang dipilih. Jika ada perubahan jadwal, mohon konfirmasi terlebih dahulu kepada pihak panitia.'}
+                            </p>
+                            <p className="text-xs font-bold text-[#141414]">
+                              Pembayaran &amp; pembelian produk dilakukan langsung secara onsite di lokasi acara sesuai ketentuan panitia penyelenggara.
                             </p>
                           </div>
                         </div>
@@ -2436,9 +2287,14 @@ export const RegistrationForm: React.FC<RegistrationFormProps> = ({
                         href={event.whatsappGroupLink}
                         target="_blank"
                         rel="noreferrer"
+                        onClick={handleMarkWhatsAppJoined}
                         className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-5 py-3 rounded-2xl text-xs sm:text-sm transition-all shrink-0"
                       >
-                        <span>📲 Masuk Group WhatsApp</span>
+                        <span>
+                          {confirmedRegistration.joinedWhatsAppGroup
+                            ? '✓ Sudah Gabung Group WhatsApp'
+                            : '📲 Masuk Group WhatsApp'}
+                        </span>
                         <ExternalLink className="w-4 h-4" />
                       </a>
                     </div>

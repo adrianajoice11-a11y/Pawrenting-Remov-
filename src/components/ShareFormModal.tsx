@@ -130,7 +130,8 @@ Yuk lindungi anabul tersayang dengan vaksinasi resmi bersama tim dokter hewan RE
 
 ✨ *Fasilitas & Sistem Antrian*:
 • Kuota Vaksin Real-Time (Otomatis Terkunci saat Checkout)
-• Upload Bukti Payment -> Langsung Terverifikasi & Dapat Nomor Antrian + Barcode
+• Konfirmasi Pendaftaran -> Langsung Terdaftar & Dapat Nomor Antrian + Barcode
+• Pembayaran & Pembelian Produk Dilakukan Langsung Secara Onsite di Lokasi
 • Akses Grup WhatsApp Resmi Pawrenting REMOV
 
 👇 *Klik Tautan Formulir Pendaftaran Online*:

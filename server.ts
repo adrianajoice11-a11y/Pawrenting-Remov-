@@ -1,9 +1,10 @@
+import 'dotenv/config';
 import express from 'express';
-import http from 'http';
+import http from 'node:http';
 import { createServer as createViteServer } from 'vite';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type {
   AppDatabase,
   EventConfig,
@@ -14,8 +15,17 @@ import type {
   BankAccount,
   Voucher,
   EventArchive,
-  HealthChecklistItem
+  HealthChecklistItem,
+  SheetSyncAction,
+  SheetSyncAuditEntry,
+  SheetSyncQueueJob,
+  SheetSyncLiveState
 } from './src/types.ts';
+import {
+  DEFAULT_COLUMNS as CANONICAL_SPREADSHEET_COLUMNS,
+  buildRegistrationsCSVContent,
+  mergeSpreadsheetColumnsWithDatabase,
+} from './src/utils/csvExport.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,28 +73,7 @@ const defaultHealthChecklist: HealthChecklistItem[] = [
   },
 ];
 
-const defaultSpreadsheetColumns = [
-  { key: 'queueNumber', label: 'No. Antrian', enabled: true },
-  { key: 'barcodeCode', label: 'Barcode Antrian', enabled: true },
-  { key: 'checkInStatus', label: 'Status Hadir Booth', enabled: true },
-  { key: 'checkedInAt', label: 'Waktu Check-In', enabled: true },
-  { key: 'createdAt', label: 'Timestamp Daftar', enabled: true },
-  { key: 'ownerName', label: 'Nama Lengkap', enabled: true },
-  { key: 'ownerPhone', label: 'No Telepon', enabled: true },
-  { key: 'ownerCity', label: 'Alamat Lengkap', enabled: true },
-  { key: 'referralSource', label: 'Informasi Vaksin', enabled: true },
-  { key: 'petType', label: 'Jenis Hewan Peliharaan', enabled: true },
-  { key: 'petName', label: 'Nama Anabul yang akan divaksin', enabled: true },
-  { key: 'petGender', label: 'Jenis Kelamin Anabul', enabled: true },
-  { key: 'vaccineName', label: 'Pilih Vaksin', enabled: true },
-  { key: 'vaccineNotes', label: 'Keterangan Kebutuhan Tambahan', enabled: true },
-  { key: 'selectedSession', label: 'Pemilihan kloter Pemeriksaan', enabled: true },
-  { key: 'paymentProofUrl', label: 'Bukti Payment Booking', enabled: true },
-  { key: 'paymentStatus', label: 'Status Booking', enabled: true },
-  { key: 'joinedWhatsAppGroup', label: 'Status Group WhatsApp', enabled: true },
-  { key: 'regNumber', label: 'No. Registrasi', enabled: true },
-  { key: 'voucherCode', label: 'Kode Voucher Petshop', enabled: true },
-];
+const defaultSpreadsheetColumns = CANONICAL_SPREADSHEET_COLUMNS.map(c => ({ ...c }));
 
 const defaultInitialData: AppDatabase = {
   event: {
@@ -335,7 +324,8 @@ const defaultInitialData: AppDatabase = {
     lastSyncTime: '',
     lastSyncStatus: 'idle',
     lastSyncMessage: 'Belum pernah sinkronisasi ke Google Sheets',
-  }
+  },
+  sheetAuditLogs: [],
 };
 
 function sanitizeVaccinesForDisk(vaccines: VaccineOption[]): VaccineOption[] {
@@ -419,20 +409,10 @@ function parseDbPayload(parsed: any): AppDatabase {
     spreadsheetConfig: {
       ...defaultInitialData.event.spreadsheetConfig,
       ...(parsed.event?.spreadsheetConfig || {}),
-      columns: (() => {
-        const existingCols = parsed.event?.spreadsheetConfig?.columns;
-        if (!existingCols || existingCols.length === 0) return defaultSpreadsheetColumns;
-        if (existingCols.some((c: any) => c.key === 'vaccineNotes')) return existingCols;
-        const nextCols = [...existingCols];
-        const vacIdx = nextCols.findIndex((c: any) => c.key === 'vaccineName');
-        const newCol = { key: 'vaccineNotes', label: 'Keterangan Kebutuhan Tambahan', enabled: true };
-        if (vacIdx >= 0) {
-          nextCols.splice(vacIdx + 1, 0, newCol);
-        } else {
-          nextCols.push(newCol);
-        }
-        return nextCols;
-      })(),
+      columns: mergeSpreadsheetColumnsWithDatabase(
+        parsed.event?.spreadsheetConfig?.columns,
+        Array.isArray(parsed.registrations) ? parsed.registrations : []
+      ),
     },
     bankAccounts: Array.isArray(parsed.event?.bankAccounts)
       ? parsed.event.bankAccounts.map((b: any, idx: number) => ({
@@ -459,10 +439,11 @@ function parseDbPayload(parsed: any): AppDatabase {
       ...r,
       checkInStatus: r.checkInStatus || 'belum_hadir',
     };
-    if (normalized.paymentStatus === 'expired') {
-      normalized.paymentStatus = 'pending_payment';
+    if (normalized.paymentStatus === 'expired' || normalized.paymentStatus === 'pending_payment') {
+      normalized.paymentStatus = 'verified';
       normalized.paymentDeadlineAt = undefined;
-      normalized.paymentNotes = 'Menunggu upload bukti bayar (pendaftaran tersimpan permanen — tidak hangus).';
+      normalized.verifiedAt = normalized.verifiedAt || normalized.createdAt || new Date().toISOString();
+      normalized.paymentNotes = 'Terdaftar — pembayaran & pembelian produk dilakukan langsung secara onsite di lokasi acara.';
     }
     if (normalized.paymentStatus === 'verified' && !normalized.queueNumber) {
       maxSeq += 1;
@@ -492,7 +473,8 @@ function parseDbPayload(parsed: any): AppDatabase {
     holds: Array.isArray(parsed.holds) ? parsed.holds : [],
     vouchers: Array.isArray(parsed.vouchers) ? parsed.vouchers : [],
     archives: Array.isArray(parsed.archives) ? parsed.archives : defaultInitialData.archives,
-    sheetConfig: { ...defaultInitialData.sheetConfig, ...(parsed.sheetConfig || {}) }
+    sheetConfig: { ...defaultInitialData.sheetConfig, ...(parsed.sheetConfig || {}) },
+    sheetAuditLogs: Array.isArray(parsed.sheetAuditLogs) ? parsed.sheetAuditLogs.slice(0, 200) : [],
   };
 }
 
@@ -761,16 +743,263 @@ async function syncToGoogleSheetWebhook(webhookUrl: string, payload: any) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
     });
     if (response.ok) {
       return { success: true, message: 'Berhasil dikirim ke Google Sheets.' };
     } else {
       const txt = await response.text().catch(() => '');
-      return { success: false, message: `Google Sheets merespon status ${response.status}: ${txt}` };
+      return { success: false, message: `Google Sheets merespon status ${response.status}: ${txt.slice(0, 180)}` };
     }
   } catch (err: any) {
     return { success: false, message: `Gagal menghubungi Google Sheets: ${err.message || 'Network error'}` };
   }
+}
+
+interface InternalSheetQueueItem {
+  job: SheetSyncQueueJob;
+  webhookUrl: string;
+  payload: any;
+  syncedRegIds?: string[];
+  markAllSynced?: boolean;
+  resolve?: (result: { success: boolean; message: string; auditEntry: SheetSyncAuditEntry }) => void;
+}
+
+const pendingSheetQueue: InternalSheetQueueItem[] = [];
+let activeSheetQueueItem: InternalSheetQueueItem | null = null;
+let isProcessingSheetQueue = false;
+let sessionCompletedSyncCount = 0;
+let sessionFailedSyncCount = 0;
+let lastSheetTransitionAt = new Date().toISOString();
+
+function formatRegTargetLabel(reg: Registration): string {
+  const q = reg.queueNumber ? `#${reg.queueNumber} · ` : '';
+  return `${q}${reg.ownerName} (${reg.petName})`;
+}
+
+function getSheetSyncLiveState(db: AppDatabase): SheetSyncLiveState {
+  const webhookConfigured = Boolean(db.sheetConfig.webhookUrl && db.sheetConfig.webhookUrl.trim().startsWith('http'));
+  const totalRegs = db.registrations.length;
+  const syncedRegs = db.registrations.filter(r => r.syncedToGoogleSheet).length;
+  const unsyncedRegs = Math.max(0, totalRegs - syncedRegs);
+
+  let pipelineStatus: SheetSyncLiveState['pipelineStatus'] = 'idle';
+  if (!webhookConfigured) {
+    pipelineStatus = 'unconfigured';
+  } else if (activeSheetQueueItem) {
+    pipelineStatus = activeSheetQueueItem.job.status === 'retrying' ? 'retrying' : 'pushing';
+  } else if (pendingSheetQueue.length > 0) {
+    pipelineStatus = 'pushing';
+  }
+
+  return {
+    pipelineStatus,
+    webhookConfigured,
+    autoSync: db.sheetConfig.autoSync !== false,
+    activeJob: activeSheetQueueItem ? { ...activeSheetQueueItem.job } : null,
+    queuedJobs: pendingSheetQueue.map(item => ({ ...item.job })),
+    pendingQueueCount: (activeSheetQueueItem ? 1 : 0) + pendingSheetQueue.length,
+    syncedRegistrationsCount: syncedRegs,
+    unsyncedRegistrationsCount: unsyncedRegs,
+    totalRegistrationsCount: totalRegs,
+    sessionCompletedCount: sessionCompletedSyncCount,
+    sessionFailedCount: sessionFailedSyncCount,
+    lastTransitionAt: lastSheetTransitionAt,
+  };
+}
+
+async function processSheetSyncQueue() {
+  if (isProcessingSheetQueue) return;
+  isProcessingSheetQueue = true;
+
+  try {
+    while (pendingSheetQueue.length > 0) {
+      const nextItem = pendingSheetQueue.shift()!;
+      activeSheetQueueItem = nextItem;
+      const startedMs = Date.now();
+      nextItem.job.startedAt = new Date().toISOString();
+      nextItem.job.status = 'pushing';
+      lastSheetTransitionAt = nextItem.job.startedAt;
+      broadcastDbUpdate('sheet_sync');
+
+      let finalResult: { success: boolean; message: string } = {
+        success: false,
+        message: 'Tidak dapat memproses sinkronisasi.'
+      };
+
+      const maxAttempts = Math.max(1, nextItem.job.maxAttempts);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        nextItem.job.attempt = attempt;
+        if (attempt > 1) {
+          nextItem.job.status = 'retrying';
+          lastSheetTransitionAt = new Date().toISOString();
+          broadcastDbUpdate('sheet_sync');
+          await new Promise(resolve => setTimeout(resolve, Math.min(2500, 600 * attempt)));
+          nextItem.job.status = 'pushing';
+          lastSheetTransitionAt = new Date().toISOString();
+          broadcastDbUpdate('sheet_sync');
+        }
+
+        finalResult = await syncToGoogleSheetWebhook(nextItem.webhookUrl, nextItem.payload);
+        if (finalResult.success) {
+          break;
+        }
+        nextItem.job.lastError = finalResult.message;
+      }
+
+      const completedIso = new Date().toISOString();
+      const durationMs = Math.max(1, Date.now() - startedMs);
+      const auditEntry: SheetSyncAuditEntry = {
+        id: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        action: nextItem.job.action,
+        status: finalResult.success ? 'success' : 'failed',
+        targetLabel: nextItem.job.targetLabel,
+        regId: nextItem.job.regId,
+        regNumber: nextItem.job.regNumber,
+        recordCount: nextItem.job.recordCount,
+        attempts: nextItem.job.attempt,
+        durationMs,
+        message: finalResult.message,
+        webhookConfigured: Boolean(nextItem.webhookUrl && nextItem.webhookUrl.startsWith('http')),
+        createdAt: nextItem.job.queuedAt,
+        completedAt: completedIso,
+      };
+
+      if (finalResult.success) {
+        sessionCompletedSyncCount += 1;
+      } else {
+        sessionFailedSyncCount += 1;
+      }
+
+      const freshDb = readDb();
+      if (finalResult.success) {
+        if (nextItem.markAllSynced) {
+          freshDb.registrations.forEach(r => {
+            r.syncedToGoogleSheet = true;
+            r.sheetSyncedAt = completedIso;
+          });
+        } else if (Array.isArray(nextItem.syncedRegIds) && nextItem.syncedRegIds.length > 0) {
+          const idSet = new Set(nextItem.syncedRegIds);
+          freshDb.registrations.forEach(r => {
+            if (idSet.has(r.id)) {
+              r.syncedToGoogleSheet = true;
+              r.sheetSyncedAt = completedIso;
+            }
+          });
+        } else if (nextItem.job.regId) {
+          const target = freshDb.registrations.find(r => r.id === nextItem.job.regId);
+          if (target) {
+            target.syncedToGoogleSheet = true;
+            target.sheetSyncedAt = completedIso;
+          }
+        }
+      } else if (nextItem.job.regId && nextItem.job.action === 'NEW_REGISTRATION') {
+        const target = freshDb.registrations.find(r => r.id === nextItem.job.regId);
+        if (target && target.syncedToGoogleSheet === undefined) {
+          target.syncedToGoogleSheet = false;
+        }
+      }
+
+      freshDb.sheetConfig.lastSyncTime = completedIso;
+      freshDb.sheetConfig.lastSyncStatus = finalResult.success ? 'success' : 'failed';
+      freshDb.sheetConfig.lastSyncMessage = finalResult.message;
+      freshDb.sheetAuditLogs = [auditEntry, ...(freshDb.sheetAuditLogs || [])].slice(0, 200);
+
+      activeSheetQueueItem = null;
+      lastSheetTransitionAt = completedIso;
+      writeDb(freshDb);
+
+      if (nextItem.resolve) {
+        nextItem.resolve({
+          success: finalResult.success,
+          message: finalResult.message,
+          auditEntry,
+        });
+      }
+    }
+  } finally {
+    activeSheetQueueItem = null;
+    isProcessingSheetQueue = false;
+  }
+}
+
+function enqueueSheetSync(options: {
+  webhookUrl: string;
+  action: SheetSyncAction;
+  targetLabel: string;
+  payload: any;
+  regId?: string;
+  regNumber?: string;
+  syncedRegIds?: string[];
+  markAllSynced?: boolean;
+  recordCount?: number;
+  maxAttempts?: number;
+}) {
+  const nowIso = new Date().toISOString();
+  const job: SheetSyncQueueJob = {
+    jobId: `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    action: options.action,
+    targetLabel: options.targetLabel,
+    regId: options.regId,
+    regNumber: options.regNumber,
+    recordCount: options.recordCount ?? 1,
+    status: 'queued',
+    attempt: 0,
+    maxAttempts: options.maxAttempts ?? (options.action === 'TEST_CONNECTION' ? 1 : 3),
+    queuedAt: nowIso,
+  };
+
+  pendingSheetQueue.push({
+    job,
+    webhookUrl: options.webhookUrl,
+    payload: options.payload,
+    syncedRegIds: options.syncedRegIds,
+    markAllSynced: options.markAllSynced,
+  });
+  lastSheetTransitionAt = nowIso;
+  broadcastDbUpdate('sheet_sync');
+  void processSheetSyncQueue();
+}
+
+function enqueueSheetSyncAndWait(options: {
+  webhookUrl: string;
+  action: SheetSyncAction;
+  targetLabel: string;
+  payload: any;
+  regId?: string;
+  regNumber?: string;
+  syncedRegIds?: string[];
+  markAllSynced?: boolean;
+  recordCount?: number;
+  maxAttempts?: number;
+}): Promise<{ success: boolean; message: string; auditEntry: SheetSyncAuditEntry }> {
+  return new Promise((resolve) => {
+    const nowIso = new Date().toISOString();
+    const job: SheetSyncQueueJob = {
+      jobId: `job_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      action: options.action,
+      targetLabel: options.targetLabel,
+      regId: options.regId,
+      regNumber: options.regNumber,
+      recordCount: options.recordCount ?? 1,
+      status: 'queued',
+      attempt: 0,
+      maxAttempts: options.maxAttempts ?? (options.action === 'TEST_CONNECTION' ? 1 : 3),
+      queuedAt: nowIso,
+    };
+
+    pendingSheetQueue.push({
+      job,
+      webhookUrl: options.webhookUrl,
+      payload: options.payload,
+      syncedRegIds: options.syncedRegIds,
+      markAllSynced: options.markAllSynced,
+      resolve,
+    });
+    lastSheetTransitionAt = nowIso;
+    broadcastDbUpdate('sheet_sync');
+    void processSheetSyncQueue();
+  });
 }
 
 async function startServer() {
@@ -1047,8 +1276,7 @@ async function startServer() {
   });
 
   // 4. PUBLIC: Submit Registration (POST /api/registrations)
-  // - With paymentProofUrl -> Auto-verified booking + Instant Queue Number (01, 02, 03...) + Barcode!
-  // - Without paymentProofUrl -> Saved permanently (pending_payment) without expiration!
+  // - Onsite-only payment/purchase policy: automatically verified with instant Queue Number (01, 02, 03...) + Barcode!
   app.post('/api/registrations', async (req, res) => {
     try {
       const regData = req.body;
@@ -1118,9 +1346,6 @@ async function startServer() {
       const regNumber = `REMOV-${year}-${vaccine.code.toUpperCase()}-${seqNumber}`;
       const regId = 'reg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
 
-      const proofUrl = regData.paymentProofUrl ? String(regData.paymentProofUrl).trim() : '';
-      const hasProof = proofUrl.length > 0;
-      const proofType: 'upload' | 'link' = proofUrl.startsWith('data:') ? 'upload' : (proofUrl.startsWith('http') ? 'link' : 'upload');
       const nowIso = new Date().toISOString();
 
       const newRegistration: Registration = {
@@ -1159,70 +1384,53 @@ async function startServer() {
         selectedSession: regData.selectedSession || db.event.sessions[0] || 'Sesi Utama',
         addOns: [],
         totalAmount: vaccine.price,
-        paymentMethod: regData.paymentMethod || (vaccine.price === 0 ? 'Tanpa Biaya' : 'QRIS REMOV Official'),
-        paymentBankTarget: regData.paymentBankTarget || '',
-        paymentProofUrl: proofUrl,
-        paymentProofType: proofType,
-        paymentStatus: hasProof ? 'verified' : 'pending_payment',
+        paymentMethod: vaccine.price === 0 ? 'Tanpa Biaya (Onsite)' : 'Pembayaran Onsite (Di Lokasi Event)',
+        paymentBankTarget: '',
+        paymentProofUrl: '',
+        paymentStatus: 'verified',
         paymentDeadlineAt: undefined,
-        paymentNotes: hasProof
-          ? 'Otomatis terverifikasi saat bukti payment booking dilampirkan'
-          : 'Belum upload bukti bayar (pendaftaran tersimpan permanen — tidak hangus).',
-        verifiedAt: hasProof ? nowIso : undefined,
+        paymentNotes: isNoVaccine
+          ? 'Pendaftaran non-vaksin (keperluan lainnya) — transaksi langsung secara onsite di lokasi'
+          : (vaccine.price === 0
+              ? 'Pendaftaran layanan tanpa biaya booking — konfirmasi onsite di booth'
+              : 'Booking terkonfirmasi — pembayaran & pembelian produk dilakukan langsung secara onsite di lokasi acara sesuai ketentuan panitia'),
+        verifiedAt: nowIso,
         checkInStatus: 'belum_hadir',
         joinedWhatsAppGroup: !!regData.joinedWhatsAppGroup,
         syncedToGoogleSheet: false,
       };
 
-      // Assign Queue Number immediately if payment proof is provided (or vaccine is free price=0 / non-vaccine)
-      if (hasProof || vaccine.price === 0) {
-        newRegistration.paymentStatus = 'verified';
-        newRegistration.verifiedAt = nowIso;
-        newRegistration.paymentDeadlineAt = undefined;
-        newRegistration.paymentNotes = isNoVaccine
-          ? 'Pendaftaran non-vaksin (keperluan lainnya) otomatis terverifikasi'
-          : (vaccine.price === 0 && !hasProof
-              ? 'Pendaftaran layanan gratis otomatis terverifikasi'
-              : 'Otomatis terverifikasi booking saat bukti payment booking dilampirkan');
-        assignQueueNumberIfMissing(db, newRegistration);
-      }
+      assignQueueNumberIfMissing(db, newRegistration);
 
       db.registrations.unshift(newRegistration);
       writeDb(db);
 
-      // Async sync to Google Sheets if enabled
+      // Async queued sync to Google Sheets if enabled
       if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
         const sheetItem = {
           ...newRegistration,
           paymentProofUrl: formatProofUrlForSheet(newRegistration, req),
         };
-        syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+        enqueueSheetSync({
+          webhookUrl: db.sheetConfig.webhookUrl,
           action: 'NEW_REGISTRATION',
-          data: sheetItem,
-          spreadsheetConfig: db.event.spreadsheetConfig,
-          timestamp: new Date().toISOString()
-        }).then(result => {
-          const freshDb = readDb();
-          const target = freshDb.registrations.find(r => r.id === regId);
-          if (target) {
-            target.syncedToGoogleSheet = result.success;
-            target.sheetSyncedAt = new Date().toISOString();
-            freshDb.sheetConfig.lastSyncTime = new Date().toISOString();
-            freshDb.sheetConfig.lastSyncStatus = result.success ? 'success' : 'failed';
-            freshDb.sheetConfig.lastSyncMessage = result.message;
-            writeDb(freshDb);
+          targetLabel: formatRegTargetLabel(newRegistration),
+          regId: newRegistration.id,
+          regNumber: newRegistration.regNumber,
+          recordCount: 1,
+          payload: {
+            action: 'NEW_REGISTRATION',
+            data: sheetItem,
+            spreadsheetConfig: db.event.spreadsheetConfig,
+            timestamp: new Date().toISOString()
           }
-        }).catch(err => {
-          console.error('Auto sync to sheet failed:', err);
         });
       }
 
       res.json({
         success: true,
         registration: newRegistration,
-        message: newRegistration.paymentStatus === 'verified'
-          ? `Sukses Booking! Nomor Antrian Anda: ${newRegistration.queueNumber}`
-          : 'Data pendaftaran tersimpan permanen! Anda dapat mengunggah bukti payment kapan saja agar mendapat nomor antrian.'
+        message: `Sukses Booking! Nomor Antrian Anda: ${newRegistration.queueNumber}. Silakan datang langsung ke lokasi untuk pembayaran & pembelian produk secara onsite.`
       });
     } catch (err: any) {
       console.error('Error submitting registration:', err);
@@ -1262,12 +1470,20 @@ async function startServer() {
     writeDb(db);
 
     if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
-      syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+      enqueueSheetSync({
+        webhookUrl: db.sheetConfig.webhookUrl,
         action: 'UPDATE_STATUS',
-        data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
-        spreadsheetConfig: db.event.spreadsheetConfig,
-        timestamp: new Date().toISOString()
-      }).catch(console.error);
+        targetLabel: formatRegTargetLabel(reg),
+        regId: reg.id,
+        regNumber: reg.regNumber,
+        recordCount: 1,
+        payload: {
+          action: 'UPDATE_STATUS',
+          data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
+          spreadsheetConfig: db.event.spreadsheetConfig,
+          timestamp: new Date().toISOString()
+        }
+      });
     }
 
     res.json({
@@ -1292,23 +1508,31 @@ async function startServer() {
     // Prioritize exact ID / RegNumber / Queue / Barcode / Phone before fuzzy name match
     const upper = rawQuery.toUpperCase();
     const padded = /^\d+$/.test(rawQuery) ? rawQuery.padStart(2, '0') : '';
-    const exactFind = (list: Registration[]) =>
-      list.find(
-        r =>
-          r.id === rawQuery ||
-          r.regNumber.toUpperCase() === upper ||
-          (r.barcodeCode && r.barcodeCode.toUpperCase() === upper) ||
-          (r.queueNumber && (r.queueNumber.toUpperCase() === upper || (padded && r.queueNumber === padded) || `Q${r.queueNumber}` === upper)) ||
-          (normalizePhoneDigits(rawQuery).length >= 6 && normalizePhoneDigits(r.ownerPhone) === normalizePhoneDigits(rawQuery))
-      ) || list.find(r => matchRegistrationQuery(r, rawQuery));
+    const phoneDigits = normalizePhoneDigits(rawQuery);
+    const isExactMatch = (r: Registration) =>
+      r.id === rawQuery ||
+      r.regNumber.toUpperCase() === upper ||
+      (!!r.barcodeCode && r.barcodeCode.toUpperCase() === upper) ||
+      (!!r.queueNumber &&
+        (r.queueNumber.toUpperCase() === upper ||
+          (!!padded && r.queueNumber === padded) ||
+          `Q${r.queueNumber}` === upper)) ||
+      (phoneDigits.length >= 6 && normalizePhoneDigits(r.ownerPhone) === phoneDigits);
 
-    const activeMatch = exactFind(db.registrations);
-    if (activeMatch) {
+    const findAllMatching = (list: Registration[]) => {
+      const exacts = list.filter(isExactMatch);
+      if (exacts.length > 0) return exacts;
+      return list.filter(r => matchRegistrationQuery(r, rawQuery));
+    };
+
+    const activeMatches = findAllMatching(db.registrations);
+    if (activeMatches.length > 0) {
       const publicEvt = { ...db.event };
       delete (publicEvt as any).adminPin;
       return res.json({
         success: true,
-        registration: activeMatch,
+        registration: activeMatches[0],
+        matches: activeMatches.map(r => ({ registration: r, isArchived: false })),
         event: publicEvt,
         isArchived: false,
       });
@@ -1317,8 +1541,8 @@ async function startServer() {
     // Fallback: search completed/archived events so historical customer records remain retrievable by schedule!
     for (const arc of db.archives) {
       if (!Array.isArray(arc.registrations) || arc.registrations.length === 0) continue;
-      const archivedItem = exactFind(arc.registrations);
-      if (archivedItem) {
+      const archivedMatches = findAllMatching(arc.registrations);
+      if (archivedMatches.length > 0) {
         const arcEvent = {
           ...db.event,
           title: arc.eventTitle || db.event.title,
@@ -1332,23 +1556,25 @@ async function startServer() {
           eventCompletedAt: arc.archivedAt,
         };
         delete (arcEvent as any).adminPin;
+        const archiveInfo = {
+          id: arc.id,
+          eventTitle: arc.eventTitle,
+          eventDate: arc.eventDate,
+          timeRange: arc.timeRange,
+          month: arc.month,
+          year: arc.year,
+          locationName: arc.locationName,
+          partnerName: arc.partnerName,
+          completionStatement: arc.completionStatement,
+          archivedAt: arc.archivedAt,
+        };
         return res.json({
           success: true,
-          registration: archivedItem,
+          registration: archivedMatches[0],
+          matches: archivedMatches.map(r => ({ registration: r, isArchived: true, archiveInfo })),
           event: arcEvent,
           isArchived: true,
-          archiveInfo: {
-            id: arc.id,
-            eventTitle: arc.eventTitle,
-            eventDate: arc.eventDate,
-            timeRange: arc.timeRange,
-            month: arc.month,
-            year: arc.year,
-            locationName: arc.locationName,
-            partnerName: arc.partnerName,
-            completionStatement: arc.completionStatement,
-            archivedAt: arc.archivedAt,
-          },
+          archiveInfo,
         });
       }
     }
@@ -1357,6 +1583,83 @@ async function startServer() {
       success: false,
       message: 'Data pendaftaran / Nomor Antrian tidak ditemukan pada jadwal event aktif maupun arsip.'
     });
+  });
+
+  // 5b. PUBLIC: Batch Real-Time Sync for Customer Device Saved Registrations
+  app.post('/api/registrations/sync-batch', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const ids: string[] = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((id: unknown) => String(id).trim()).filter(Boolean).slice(0, 20)
+      : [];
+
+    const db = readDb();
+    if (cleanExpiredHoldsAndBookings(db)) {
+      writeDb(db);
+    }
+
+    const items: Record<string, { registration: Registration; isArchived: boolean; archiveInfo?: any }> = {};
+    for (const id of ids) {
+      const activeReg = db.registrations.find(r => r.id === id);
+      if (activeReg) {
+        items[id] = { registration: activeReg, isArchived: false };
+        continue;
+      }
+      for (const arc of db.archives) {
+        const arcReg = (arc.registrations || []).find(r => r.id === id);
+        if (arcReg) {
+          items[id] = {
+            registration: arcReg,
+            isArchived: true,
+            archiveInfo: {
+              id: arc.id,
+              eventTitle: arc.eventTitle,
+              eventDate: arc.eventDate,
+              timeRange: arc.timeRange,
+              locationName: arc.locationName,
+              completionStatement: arc.completionStatement,
+            },
+          };
+          break;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      items,
+      eventStatus: db.event.eventStatus || 'active',
+      serverTime: Date.now(),
+    });
+  });
+
+  // 5c. PUBLIC: Track Real-Time WhatsApp Group Join from Customer Ticket
+  app.post('/api/registrations/:id/whatsapp-joined', (req, res) => {
+    const db = readDb();
+    const reg = db.registrations.find(r => r.id === req.params.id);
+    if (!reg) {
+      return res.status(404).json({ success: false, message: 'Data pendaftaran tidak ditemukan.' });
+    }
+    if (!reg.joinedWhatsAppGroup) {
+      reg.joinedWhatsAppGroup = true;
+      writeDb(db);
+      if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
+        enqueueSheetSync({
+          webhookUrl: db.sheetConfig.webhookUrl,
+          action: 'UPDATE_STATUS',
+          targetLabel: formatRegTargetLabel(reg),
+          regId: reg.id,
+          regNumber: reg.regNumber,
+          recordCount: 1,
+          payload: {
+            action: 'UPDATE_STATUS',
+            eventTitle: db.event.title,
+            spreadsheetConfig: db.event.spreadsheetConfig,
+            data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
+          }
+        });
+      }
+    }
+    res.json({ success: true, registration: reg });
   });
 
   // 5a. ADMIN: Real-time Ticket & Check-In Directory (Active + Archived Search)
@@ -1453,12 +1756,20 @@ async function startServer() {
     writeDb(db);
 
     if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
-      syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+      enqueueSheetSync({
+        webhookUrl: db.sheetConfig.webhookUrl,
         action: 'CHECK_IN_UPDATE',
-        data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
-        spreadsheetConfig: db.event.spreadsheetConfig,
-        timestamp: new Date().toISOString()
-      }).catch(console.error);
+        targetLabel: formatRegTargetLabel(reg),
+        regId: reg.id,
+        regNumber: reg.regNumber,
+        recordCount: 1,
+        payload: {
+          action: 'CHECK_IN_UPDATE',
+          data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
+          spreadsheetConfig: db.event.spreadsheetConfig,
+          timestamp: new Date().toISOString()
+        }
+      });
     }
 
     res.json({
@@ -1488,12 +1799,20 @@ async function startServer() {
     writeDb(db);
 
     if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
-      syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+      enqueueSheetSync({
+        webhookUrl: db.sheetConfig.webhookUrl,
         action: 'UPDATE_STATUS',
-        data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
-        spreadsheetConfig: db.event.spreadsheetConfig,
-        timestamp: new Date().toISOString()
-      }).catch(console.error);
+        targetLabel: formatRegTargetLabel(reg),
+        regId: reg.id,
+        regNumber: reg.regNumber,
+        recordCount: 1,
+        payload: {
+          action: 'UPDATE_STATUS',
+          data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
+          spreadsheetConfig: db.event.spreadsheetConfig,
+          timestamp: new Date().toISOString()
+        }
+      });
     }
 
     res.json({
@@ -1549,6 +1868,8 @@ async function startServer() {
       vouchers: db.vouchers,
       archives: db.archives,
       sheetConfig: db.sheetConfig,
+      sheetAuditLogs: db.sheetAuditLogs || [],
+      sheetSyncState: getSheetSyncLiveState(db),
       stats,
       serverTime: Date.now()
     });
@@ -1730,12 +2051,20 @@ async function startServer() {
     writeDb(db);
 
     if (db.sheetConfig.autoSync && db.sheetConfig.webhookUrl) {
-      syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+      enqueueSheetSync({
+        webhookUrl: db.sheetConfig.webhookUrl,
         action: 'UPDATE_STATUS',
-        data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
-        spreadsheetConfig: db.event.spreadsheetConfig,
-        timestamp: new Date().toISOString()
-      }).catch(console.error);
+        targetLabel: formatRegTargetLabel(reg),
+        regId: reg.id,
+        regNumber: reg.regNumber,
+        recordCount: 1,
+        payload: {
+          action: 'UPDATE_STATUS',
+          data: { ...reg, paymentProofUrl: formatProofUrlForSheet(reg, req) },
+          spreadsheetConfig: db.event.spreadsheetConfig,
+          timestamp: new Date().toISOString()
+        }
+      });
     }
 
     res.json({ success: true, registration: reg, message: 'Status pembayaran berhasil diubah.' });
@@ -1941,18 +2270,25 @@ async function startServer() {
         ...r,
         paymentProofUrl: formatProofUrlForSheet(r, req),
       }));
-      syncToGoogleSheetWebhook(db.sheetConfig.webhookUrl, {
+      enqueueSheetSync({
+        webhookUrl: db.sheetConfig.webhookUrl,
         action: 'EVENT_COMPLETED_FINAL_SYNC',
-        eventTitle: db.event.title,
-        eventDate: db.event.date,
-        timeRange: db.event.timeRange,
-        completionStatement: db.event.eventCompletedStatement,
-        completedAt: db.event.eventCompletedAt,
-        count: cleanItems.length,
-        items: cleanItems,
-        spreadsheetConfig: db.event.spreadsheetConfig,
-        timestamp: new Date().toISOString(),
-      }).catch(console.error);
+        targetLabel: `Finalisasi Event (${cleanItems.length} Peserta)`,
+        markAllSynced: true,
+        recordCount: cleanItems.length,
+        payload: {
+          action: 'EVENT_COMPLETED_FINAL_SYNC',
+          eventTitle: db.event.title,
+          eventDate: db.event.date,
+          timeRange: db.event.timeRange,
+          completionStatement: db.event.eventCompletedStatement,
+          completedAt: db.event.eventCompletedAt,
+          count: cleanItems.length,
+          items: cleanItems,
+          spreadsheetConfig: db.event.spreadsheetConfig,
+          timestamp: new Date().toISOString(),
+        }
+      });
     }
 
     res.json({
@@ -2131,7 +2467,8 @@ async function startServer() {
   // 16. ADMIN: Test Google Sheets Webhook (POST /api/admin/sheet-test)
   app.post('/api/admin/sheet-test', async (req, res) => {
     const { webhookUrl } = req.body;
-    const url = webhookUrl || readDb().sheetConfig.webhookUrl;
+    const currentDb = readDb();
+    const url = webhookUrl || currentDb.sheetConfig.webhookUrl;
     if (!url) {
       return res.status(400).json({ success: false, message: 'URL Webhook Google Sheets belum diisi.' });
     }
@@ -2149,12 +2486,14 @@ async function startServer() {
       }
     };
 
-    const result = await syncToGoogleSheetWebhook(url, testPayload);
-    const db = readDb();
-    db.sheetConfig.lastSyncTime = new Date().toISOString();
-    db.sheetConfig.lastSyncStatus = result.success ? 'success' : 'failed';
-    db.sheetConfig.lastSyncMessage = result.message;
-    writeDb(db);
+    const result = await enqueueSheetSyncAndWait({
+      webhookUrl: url,
+      action: 'TEST_CONNECTION',
+      targetLabel: 'Uji Koneksi Webhook',
+      recordCount: 1,
+      maxAttempts: 1,
+      payload: testPayload,
+    });
 
     res.json(result);
   });
@@ -2182,25 +2521,119 @@ async function startServer() {
       timestamp: new Date().toISOString()
     };
 
-    const result = await syncToGoogleSheetWebhook(url, payload);
+    const result = await enqueueSheetSyncAndWait({
+      webhookUrl: url,
+      action: 'SYNC_ALL_REGISTRATIONS',
+      targetLabel: `Sinkronisasi Penuh (${cleanItems.length} Peserta)`,
+      markAllSynced: true,
+      recordCount: cleanItems.length,
+      maxAttempts: 3,
+      payload,
+    });
 
-    if (result.success) {
-      db.registrations.forEach(r => {
-        r.syncedToGoogleSheet = true;
-        r.sheetSyncedAt = new Date().toISOString();
+    const latestDb = readDb();
+    res.json({
+      ...result,
+      syncedCount: cleanItems.length,
+      sheetConfig: latestDb.sheetConfig,
+      sheetAuditLogs: latestDb.sheetAuditLogs || [],
+      sheetSyncState: getSheetSyncLiveState(latestDb),
+    });
+  });
+
+  // 17a. ADMIN: Sync Only Unsynced / Pending Registrations to Google Sheets (POST /api/admin/sheet-sync-pending)
+  app.post('/api/admin/sheet-sync-pending', async (req, res) => {
+    const db = readDb();
+    const url = db.sheetConfig.webhookUrl;
+    if (!url) {
+      return res.status(400).json({ success: false, message: 'URL Webhook Google Sheets belum diatur.' });
+    }
+
+    const unsyncedRegs = db.registrations.filter(r => !r.syncedToGoogleSheet);
+    if (unsyncedRegs.length === 0) {
+      return res.json({
+        success: true,
+        syncedCount: 0,
+        message: 'Seluruh data peserta sudah tersinkron dengan Google Sheets.',
+        sheetConfig: db.sheetConfig,
+        sheetAuditLogs: db.sheetAuditLogs || [],
+        sheetSyncState: getSheetSyncLiveState(db),
       });
     }
 
-    db.sheetConfig.lastSyncTime = new Date().toISOString();
-    db.sheetConfig.lastSyncStatus = result.success ? 'success' : 'failed';
-    db.sheetConfig.lastSyncMessage = result.message;
-    writeDb(db);
+    const cleanItems = unsyncedRegs.map(r => ({
+      ...r,
+      paymentProofUrl: formatProofUrlForSheet(r, req),
+    }));
 
+    const result = await enqueueSheetSyncAndWait({
+      webhookUrl: url,
+      action: 'SYNC_PENDING_BATCH',
+      targetLabel: `Push Data Tertunda (${cleanItems.length} Peserta)`,
+      syncedRegIds: unsyncedRegs.map(r => r.id),
+      recordCount: cleanItems.length,
+      maxAttempts: 3,
+      payload: {
+        action: 'SYNC_ALL_REGISTRATIONS',
+        eventTitle: db.event.title,
+        eventDate: db.event.date,
+        count: cleanItems.length,
+        items: cleanItems,
+        spreadsheetConfig: db.event.spreadsheetConfig,
+        timestamp: new Date().toISOString()
+      },
+    });
+
+    const latestDb = readDb();
     res.json({
       ...result,
-      syncedCount: db.registrations.length,
-      sheetConfig: db.sheetConfig
+      syncedCount: cleanItems.length,
+      sheetConfig: latestDb.sheetConfig,
+      sheetAuditLogs: latestDb.sheetAuditLogs || [],
+      sheetSyncState: getSheetSyncLiveState(latestDb),
     });
+  });
+
+  // 17c. ADMIN: Get Live Google Sheets Sync Status & Audit Logs (GET /api/admin/sheet-audit)
+  app.get('/api/admin/sheet-audit', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const db = readDb();
+    res.json({
+      success: true,
+      sheetConfig: db.sheetConfig,
+      sheetAuditLogs: db.sheetAuditLogs || [],
+      sheetSyncState: getSheetSyncLiveState(db),
+    });
+  });
+
+  // 17b. ADMIN: Direct Synchronized CSV Download (GET /api/admin/registrations/export.csv)
+  app.get('/api/admin/registrations/export.csv', (req, res) => {
+    const db = readDb();
+    const archiveId = typeof req.query.archiveId === 'string' ? req.query.archiveId.trim() : '';
+    let regs = db.registrations;
+    let exportTitle = db.event.title;
+
+    if (archiveId) {
+      const arc = db.archives.find(a => a.id === archiveId);
+      if (!arc) {
+        return res.status(404).json({ success: false, message: 'Arsip event tidak ditemukan.' });
+      }
+      regs = arc.registrations || [];
+      exportTitle = arc.eventTitle || db.event.title;
+    }
+
+    const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
+    const host = (req.headers['x-forwarded-host'] as string) || req.get('host') || 'localhost:3000';
+    const origin = `${proto.split(',')[0].trim()}://${host.split(',')[0].trim()}`;
+
+    const { csvContent } = buildRegistrationsCSVContent(regs, db.event.spreadsheetConfig, origin);
+    const timestamp = new Date().toISOString().slice(0, 10);
+    const safeTitle = (exportTitle || 'Pawrenting_REMOV').replace(/[^a-zA-Z0-9]+/g, '_');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_Registrations_${timestamp}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(csvContent);
   });
 
   // 18. ADMIN: Reset / Restore Demo Data (POST /api/admin/reset-demo)
@@ -2210,19 +2643,24 @@ async function startServer() {
   });
 
   const httpServer = http.createServer(app);
+  const distDir = path.resolve(__dirname, 'dist');
+  const distIndexPath = path.resolve(distDir, 'index.html');
+  const useProdStatic = process.env.NODE_ENV === 'production' && fs.existsSync(distIndexPath);
 
   // Vite middleware in dev or static files in production
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+  if (useProdStatic) {
+    app.use(express.static(distDir));
     app.get('*', (req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(distIndexPath);
     });
   } else {
     const isHmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
+      root: __dirname,
       server: {
         middlewareMode: true,
-        hmr: isHmrDisabled ? false : { server: httpServer },
+        hmr: !isHmrDisabled,
+        ws: isHmrDisabled ? false : { server: httpServer },
         watch: isHmrDisabled ? null : {},
       },
       appType: 'spa',
@@ -2230,7 +2668,10 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  const PORT = 3000;
+  const PORT = Number(process.env.DEFAULT_APP_PORT) || 3000;
+  httpServer.on('error', (err) => {
+    console.error('Server HTTP error:', err);
+  });
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🐾 Pawrenting REMOV Server running on http://0.0.0.0:${PORT}`);
   });

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from './components/Header.tsx';
 import { RegistrationForm } from './components/RegistrationForm.tsx';
 import { CheckTicketModal } from './components/CheckTicketModal.tsx';
@@ -6,7 +6,7 @@ import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { AdminLoginModal } from './components/AdminLoginModal.tsx';
 import { ShareFormModal } from './components/ShareFormModal.tsx';
 import type { EventConfig, VaccineOption } from './types.ts';
-import { AlertCircle, Lock, QrCode, LogOut } from 'lucide-react';
+import { AlertCircle, Lock, QrCode, LogOut, RefreshCw } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'form' | 'ticket' | 'admin'>('form');
@@ -14,6 +14,8 @@ export default function App() {
   const [vaccines, setVaccines] = useState<VaccineOption[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const isFetchingRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
 
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -26,29 +28,60 @@ export default function App() {
   const [loginTargetTab, setLoginTargetTab] = useState<'admin' | 'ticket'>('admin');
   const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
 
-  const fetchEventData = async () => {
+  const fetchEventData = useCallback(async (force = false) => {
+    if (isFetchingRef.current && !force) return;
+    isFetchingRef.current = true;
+
+    const maxAttempts = 3;
     try {
-      const res = await fetch(`/api/event?_t=${Date.now()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error('Gagal memuat informasi event');
-      const data = await res.json();
-      if (data.success) {
-        setEvent(data.event);
-        setVaccines(data.vaccines || []);
-        setFetchError(null);
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (!isMountedRef.current) return;
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          throw new Error('Koneksi internet sedang terputus');
+        }
+        try {
+          const res = await fetch(`/api/event?_t=${Date.now()}`, { cache: 'no-store' });
+          if (!res.ok) throw new Error(`Gagal memuat informasi event (${res.status})`);
+          const data = await res.json();
+          if (data.success && isMountedRef.current) {
+            setEvent(data.event);
+            setVaccines(data.vaccines || []);
+            setFetchError(null);
+          }
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < maxAttempts - 1) {
+            await new Promise(resolve => setTimeout(resolve, 450 * (attempt + 1)));
+          }
+        }
       }
-    } catch (err: any) {
-      console.error('Error fetching event data:', err);
-      setFetchError(err.message || 'Tidak dapat terhubung ke server');
+
+      if (isMountedRef.current) {
+        const errMsg = lastErr instanceof Error ? lastErr.message : 'Tidak dapat terhubung ke server';
+        console.warn('Transient event fetch failure:', errMsg);
+        setFetchError(
+          errMsg === 'Failed to fetch'
+            ? 'Koneksi ke server terputus sementara'
+            : errMsg
+        );
+      }
     } finally {
-      setIsLoading(false);
+      isFetchingRef.current = false;
+      if (isMountedRef.current) {
+        setIsLoading(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchEventData();
+    isMountedRef.current = true;
+    fetchEventData(true);
 
-    // Real-time SSE listener so any Admin change updates all clients immediately
+    // Single shared real-time SSE listener so any Admin/Customer change updates all components
     let evtSource: EventSource | null = null;
+    let hasConnectedOnce = false;
     if (typeof EventSource !== 'undefined') {
       evtSource = new EventSource('/api/events/stream');
       evtSource.onmessage = (msg) => {
@@ -56,10 +89,20 @@ export default function App() {
           const parsed = JSON.parse(msg.data);
           if (parsed?.type === 'update') {
             fetchEventData();
+            window.dispatchEvent(new CustomEvent('remov:server-update'));
+          } else if (parsed?.type === 'connected') {
+            if (hasConnectedOnce) {
+              fetchEventData();
+              window.dispatchEvent(new CustomEvent('remov:server-update'));
+            }
+            hasConnectedOnce = true;
           }
         } catch {
           // Ignore heartbeat / malformed frames
         }
+      };
+      evtSource.onerror = () => {
+        // Browser EventSource automatically reconnects; avoid surfacing transient noise
       };
     }
 
@@ -73,23 +116,32 @@ export default function App() {
     }
 
     const interval = setInterval(() => {
-      fetchEventData();
+      if (document.visibilityState === 'visible') {
+        fetchEventData();
+      }
     }, 8000);
     const handleFocusRefresh = () => {
       if (document.visibilityState === 'visible') {
         fetchEventData();
       }
     };
-    window.addEventListener('focus', fetchEventData);
+    const handleOnlineRefresh = () => {
+      fetchEventData(true);
+    };
+
+    window.addEventListener('focus', handleFocusRefresh);
+    window.addEventListener('online', handleOnlineRefresh);
     document.addEventListener('visibilitychange', handleFocusRefresh);
     return () => {
+      isMountedRef.current = false;
       clearInterval(interval);
       evtSource?.close();
       bc?.close();
-      window.removeEventListener('focus', fetchEventData);
+      window.removeEventListener('focus', handleFocusRefresh);
+      window.removeEventListener('online', handleOnlineRefresh);
       document.removeEventListener('visibilitychange', handleFocusRefresh);
     };
-  }, []);
+  }, [fetchEventData]);
 
   // Sync browser tab title & meta description with latest Admin event configuration
   useEffect(() => {
@@ -170,9 +222,19 @@ export default function App() {
       <main className="flex-1">
         {fetchError && (
           <div className="max-w-4xl mx-auto px-4 mt-4">
-            <div className="bg-rose-50 border border-rose-200 text-rose-800 p-4 rounded-2xl flex items-center gap-3 text-xs sm:text-sm">
-              <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
-              <span>{fetchError}. Memeriksa kembali secara berkala...</span>
+            <div className="bg-rose-50 border border-rose-200 text-rose-800 p-4 rounded-2xl flex items-center justify-between gap-3 text-xs sm:text-sm">
+              <div className="flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+                <span>{fetchError}. Memeriksa kembali secara berkala...</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchEventData(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-rose-300 text-rose-700 font-bold text-xs hover:bg-rose-100 transition-colors shrink-0 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Coba Lagi</span>
+              </button>
             </div>
           </div>
         )}
