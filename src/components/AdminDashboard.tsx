@@ -3547,6 +3547,89 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Paste kode terbaru ini ke Google Sheets → Extensions → Apps Script agar baris otomatis terkelompok dalam tabel per jenis vaksin dan mendukung update check-in barcode.
               </p>
             </div>
+
+            {/* Step-by-Step Visual Illustrated Guide */}
+            <div className="border border-stone-200 rounded-2xl p-5 space-y-4 bg-stone-50/50">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-200 pb-3">
+                <div>
+                  <h3 className="font-heading font-bold text-base text-[#141414]">
+                    Panduan Bergambar Step-by-Step: Simpan Database Otomatis ke Google Sheets
+                  </h3>
+                  <p className="text-xs text-stone-500 mt-0.5">
+                    Ikuti 4 langkah ini agar seluruh pendaftar langsung tersimpan permanen di Google Sheets pribadi Anda (klik gambar untuk memperbesar).
+                  </p>
+                </div>
+                <span className="text-[11px] font-bold text-stone-600 whitespace-nowrap shrink-0">
+                  4 Langkah Mudah
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {[
+                  {
+                    step: '01',
+                    title: 'Salin Kode Script dari Admin Hub',
+                    desc: 'Di tab "Spreadsheet & Grup Tabel", klik tombol kuning "Salin Kode Script" di atas untuk menyalin kode Google Apps Script resmi.',
+                    image: '/src/assets/images/guide_step1_copy_script_1795355336892.jpg',
+                    alt: 'Langkah 1: Klik Salin Kode Script pada tab Spreadsheet & Grup Tabel di Admin Dashboard',
+                  },
+                  {
+                    step: '02',
+                    title: 'Buka Extensions → Apps Script & Simpan',
+                    desc: 'Buka Google Sheets kosong di akun Google Anda → klik menu Extensions → Apps Script, hapus kode lama lalu paste script yang disalin dan tekan ikon Save.',
+                    image: '/src/assets/images/guide_step2_apps_script_1795355338037.jpg',
+                    alt: 'Langkah 2: Buka menu Extensions lalu Apps Script di Google Sheets, paste script dan simpan',
+                  },
+                  {
+                    step: '03',
+                    title: 'Deploy sebagai Web App (Akses: Anyone)',
+                    desc: 'Klik tombol Deploy → New deployment → Select type: Web app → Execute as: Me → Who has access: pilih "Anyone" (wajib agar aplikasi bisa mengirim data), lalu Copy Web App URL.',
+                    image: '/src/assets/images/guide_step3_deploy_webapp_1795355338096.jpg',
+                    alt: 'Langkah 3: Deploy Web App dengan Who has access diatur ke Anyone dan salin Web App URL',
+                  },
+                  {
+                    step: '04',
+                    title: 'Tempel URL, Uji Koneksi & Sinkronkan',
+                    desc: 'Tempel Web App URL ke kolom "Google Apps Script Webhook URL", centang "Auto Push Otomatis", klik "Simpan Format Tabel & URL Webhook", lalu klik "Uji Koneksi" dan "Sinkronkan Semua".',
+                    image: '/src/assets/images/guide_step4_paste_sync_1795355339624.jpg',
+                    alt: 'Langkah 4: Tempel URL Webhook, simpan pengaturan, uji koneksi, dan sinkronkan semua data',
+                  },
+                ].map((item) => (
+                  <div
+                    key={item.step}
+                    className="bg-white border border-stone-200 rounded-2xl overflow-hidden flex flex-col justify-between"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPreviewPhotoUrl(item.image)}
+                      className="block w-full aspect-video bg-stone-100 border-b border-stone-200 overflow-hidden group relative cursor-zoom-in text-left"
+                    >
+                      <img
+                        src={item.image}
+                        alt={item.alt}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-200"
+                      />
+                      <span className="absolute bottom-2 right-2 bg-[#141414]/85 text-white text-[10px] font-bold px-2 py-1 rounded-lg opacity-90 group-hover:opacity-100">
+                        Perbesar Gambar
+                      </span>
+                    </button>
+
+                    <div className="p-4 space-y-1.5">
+                      <div className="text-[11px] font-mono font-bold text-stone-500">
+                        Langkah {item.step}
+                      </div>
+                      <h4 className="font-heading font-bold text-sm text-[#141414]">
+                        {item.title}
+                      </h4>
+                      <p className="text-xs text-stone-600 leading-relaxed">
+                        {item.desc}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           <RealtimeSheetSyncVisualizer
